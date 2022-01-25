@@ -1,0 +1,5 @@
+# ignore cache
+__pycache_
+
+# ignore DSstore
+.DS_Store
