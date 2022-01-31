@@ -334,20 +334,18 @@ class Probe(object):
     def get_a(self): return self._a
     
     def set_freq(self,freq=None):
-        
-        # Should erase the interaction kernels??
+
         if freq is None: freq=self.defaults['freq']
                  
         self._freq=freq
+        self._ZSelf=None #Re-set the self interaction
     
     def set_gap(self,gap=None):
         
         if gap is None: gap=self.defaults['gap']
                  
         self._gap=gap
-        self._PhiMirror=None
-        self._PhiMirrorNF=None
-        self._PhiMirrorFF=None #Re-set the mirror interaction
+        self._ZMirror=None #Re-set the mirror interaction
         self._eigenrhos=None
         self._eigencharges=None
         self._eigenexcitations=None

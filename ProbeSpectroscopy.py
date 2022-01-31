@@ -302,7 +302,7 @@ class ProbeSpectroscopy(object):
         return self._brightnesses_AWA
 
 
-    def plot_eigenrhos_scatter(self):
+    def plot_eigenrhos_scatter(self,Nmodes=10,versus_coord=False,**kwargs):
 
         from matplotlib import pyplot as plt
         from matplotlib import cm,colors
@@ -311,9 +311,12 @@ class ProbeSpectroscopy(object):
         coords=self.get_coords()
         cs = plotting.bluered_colors(len(coords))
         for coord in coords:
-            rhos = np.array(self._recorded_eigenrhos[coord])
+            rhos = np.array(self._recorded_eigenrhos[coord][:Nmodes])
             c = next(cs)
-            plt.plot(rhos.real, rhos.imag, color=c, marker='o', ls='')
+            if versus_coord:
+                plt.plot([coord]*len(rhos),rhos.real,color=c,marker='o',ls='',**kwargs)
+                plt.plot([coord]*len(rhos),rhos.imag,color=c,marker='s',ls='',**kwargs)
+            else: plt.plot(rhos.real, rhos.imag, color=c, marker='o', ls='',**kwargs)
 
         plt.axhline(0,ls='--',color='k',alpha=.5)
 
@@ -434,8 +437,11 @@ class ProbeSpectroscopyParallel(ProbeSpectroscopy):
 
         super().__init__(P)
 
-        #--- Make sure probe has self impedance already computed, so at least it doesn't need to be recomputed across parallel iterations
+        #--- Make sure probe impedances have already been computed
+        # We don't know which ones will be recomputed across parallel iterations,
+        # but we can make sure the complement is available
         ZSelf = P.get_self_impedance(k=P.get_k(), recompute=False)
+        ZMirror = P.get_mirror_impedance(k=0, recompute=False)
 
         t0 = time.time()
         eigensets = []
@@ -484,6 +490,9 @@ class ProbeGapSpectroscopyParallel(ProbeSpectroscopyParallel):
     def __init__(self,P, gaps=np.logspace(-1.5,1,100),\
                  ncpus=8, backend='multiprocessing',\
                  Nmodes=20, sommerfeld=True, **kwargs):
+
+        #--- Make sure self impedance has been calculated
+
 
         #--- Hard-code the gap calculator
         kwargs['k'] = 0 #we insist on a quasistatic calculation, otherwise some features of this class become meaningless
