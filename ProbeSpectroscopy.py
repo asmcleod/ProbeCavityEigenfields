@@ -128,7 +128,8 @@ class ProbeSpectroscopy(object):
         # in a way that is uniform across the internal coordinates
         # `reversed` is untested
 
-        print('Classifying eigensets by eigenindex...')
+        if reversed: print('Classifying eigensets by eigenindex, with reversal...')
+        else: print('Classifying eigensets by eigenindex...')
         coords = sorted(list(self._recorded_eigenrhos.keys()))
         if reversed: coords = coords[::-1]
 
@@ -329,13 +330,13 @@ class ProbeSpectroscopy(object):
         plt.gcf().colorbar(cm.ScalarMappable(norm=norm, cmap=cmap),
                      cax=cax, orientation='vertical',label='coordinate')
 
-    def plot_eigenrhos(self):
+    def plot_eigenrhos(self,Nmodes=10):
 
         from matplotlib import pyplot as plt
         from matplotlib import cm,colors
         from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-        eigenrhos_AWA = self.get_eigenrhos_AWA()
+        eigenrhos_AWA = self.get_eigenrhos_AWA(Nmodes=Nmodes)
 
         cs = plotting.bluered_colors(len(eigenrhos_AWA))
         for rhos in eigenrhos_AWA:
@@ -365,7 +366,7 @@ class ProbeSpectroscopy(object):
 
 def compute_eigenset_at_freq(P, freq, PhiM=False, **kwargs):
 
-        print('Starting freq=%1.2f' % freq)
+        print('Starting freq=%1.2g' % freq)
         t0 = time.time()
         P.set_freq(freq)
         Zself = P.get_self_impedance(k=P.get_k(), recompute=True, display=False)
@@ -378,28 +379,26 @@ def compute_eigenset_at_freq(P, freq, PhiM=False, **kwargs):
                                              recompute=True, sommerfeld=True, Nkappas=244 * 8)
 
         rhos, Qs = P.solve_eigenmodes(condition_ZM=True, condition_ZS=False, ZMthresh=0, recompute_impedance=False)
-        print('Finished freq=%1.2f THz, elapsed time: %1.2g' % (freq, time.time() - t0))
+        print('Finished freq=%1.2g, elapsed time: %1.2g s' % (freq, time.time() - t0))
 
         return rhos, Qs, Zself
 
-def compute_eigenset_at_gap(P, gap=1, k=0, **kwargs):
+def compute_eigenset_at_gap(P, gap=1, k=0, sommerfeld=True, **kwargs):
 
-        print('Starting gap=%1.2f' % gap)
+        print('Starting gap=%1.2g' % gap)
         t0 = time.time()
         # Zself = P.get_self_impedance(k=P.get_k(),recompute=True,display=False)
 
         P.set_gap(gap)
         if k is None: k=P.get_k()
-        # kappa_max=20/gap
-        kappa_max = np.inf
-        # Zmirror = P.get_mirror_impedance(k=k,farfield=False,\
-        #                                 recompute=True,sommerfeld=True,Nkappas=244*8,kappa_max=kappa_max)
 
         # Use sommerfeld calculation because it's faster
-        Zmirror = P.get_mirror_impedance(k=k, recompute=True, sommerfeld=True, **kwargs)
+        if sommerfeld and 'kappa_max' not in kwargs:
+            kwargs['kappa_max'] = 10*np.max( (1/gap, 1/P.get_a()) )
+        Zmirror = P.get_mirror_impedance(k=k, recompute=True, sommerfeld=sommerfeld, **kwargs)
 
         rhos, Qs = P.solve_eigenmodes(condition_ZM=True, condition_ZS=False, ZMthresh=0, recompute_impedance=False)
-        print('Finished gap=%1.2f, elapsed time: %1.2g' % (gap, time.time() - t0))
+        print('Finished gap=%1.2g, elapsed time: %1.2g s' % (gap, time.time() - t0))
 
         Zself = P.get_self_impedance(recompute=False, display=False)
 
@@ -407,8 +406,30 @@ def compute_eigenset_at_gap(P, gap=1, k=0, **kwargs):
 
 class ProbeSpectroscopyParallel(ProbeSpectroscopy):
 
+    class serializableProbe(object):
+        """A context manager for adding / removing attributes of a Probe
+        that are unnecessary to serialize in parallel computation."""
+
+        def __init__(self, P):
+            self.removed_attrs = {}
+            self.attrs = ['_gapSpectroscopy']
+            self.P = P
+
+        def __enter__(self):
+            # --- Remove (temporarily) attributes that slow serialization of the Probe
+            for attr in self.attrs:
+                if hasattr(self.P, attr):
+                    self.removed_attrs[attr] = getattr(self.P, attr)
+                    delattr(self.P, attr)
+
+        def __exit__(self,type, value, traceback): #last arguments are obligator
+            # --- Restore any removed Probe attributes
+            for attr in self.removed_attrs:
+                setattr(self.P, attr,
+                        self.removed_attrs[attr])
+
     def __init__(self,P, coords, eigenset_calculator=compute_eigenset_at_gap,\
-                 ncpus=8, backend='multiprocessing', Nmodes=20, **kwargs):
+                 ncpus=8, backend='multiprocessing', Nmodes=20, reversed=False, **kwargs):
         from joblib import Parallel, delayed, parallel_backend
 
         super().__init__(P)
@@ -418,16 +439,18 @@ class ProbeSpectroscopyParallel(ProbeSpectroscopy):
 
         t0 = time.time()
         eigensets = []
-        while len(eigensets) < len(coords):
-            #--- Delegate group of coords to a single parallel job
-            nstart = len(eigensets);
-            nstop = len(eigensets) + ncpus
-            coords_sub = coords[nstart:nstop]
-            new_eigensets = Parallel(backend=backend, n_jobs=ncpus)(delayed(eigenset_calculator)(P, coord, **kwargs) \
-                                                                    for coord in coords_sub)
-            print('got results!')
-            eigensets = eigensets + new_eigensets
-        print('Time elapsed: ', time.time() - t0)
+        with self.serializableProbe(P) as context:
+            with Parallel(n_jobs=ncpus,backend=backend) as parallel:
+                while len(eigensets) < len(coords):
+                    #--- Delegate group of coords to a single parallel job
+                    nstart = len(eigensets);
+                    nstop = len(eigensets) + ncpus
+                    coords_sub = coords[nstart:nstop]
+                    new_eigensets = parallel(delayed(eigenset_calculator)(P, coord, **kwargs) \
+                                                                          for coord in coords_sub)
+                    print('got results!')
+                    eigensets = eigensets + new_eigensets
+                print('Time elapsed: ', time.time() - t0)
 
         for coord, eigenset in zip(coords, eigensets):
             rhos, charges, ZSelf = eigenset
@@ -437,7 +460,7 @@ class ProbeSpectroscopyParallel(ProbeSpectroscopy):
             self.record(coord)
 
         # Run classification by eigenindex
-        self.classify_eigensets(Nmodes=Nmodes)
+        self.classify_eigensets(Nmodes=Nmodes,reversed=reversed)
 
 def get_cheb_zs_weights(Ncheb=8, A=2, gapmin=.1, demod_order=5):
 
@@ -460,12 +483,13 @@ class ProbeGapSpectroscopyParallel(ProbeSpectroscopyParallel):
 
     def __init__(self,P, gaps=np.logspace(-1.5,1,100),\
                  ncpus=8, backend='multiprocessing',\
-                 Nmodes=20, **kwargs):
+                 Nmodes=20, sommerfeld=True, **kwargs):
 
         #--- Hard-code the gap calculator
         kwargs['k'] = 0 #we insist on a quasistatic calculation, otherwise some features of this class become meaningless
-        super().__init__(P, coords=gaps, eigenset_calculator=compute_eigenset_at_gap,\
-                         ncpus=ncpus, backend=backend, Nmodes=Nmodes, **kwargs)
+        super().__init__(P, coords=gaps, eigenset_calculator=compute_eigenset_at_gap,
+                         ncpus=ncpus, backend=backend, Nmodes=Nmodes, reversed=True,
+                         sommerfeld=sommerfeld,**kwargs)
 
 class EncodedEigenfields(object):
     """This function condensed a `ProbeSpectroscopy` object
@@ -490,7 +514,7 @@ class EncodedEigenfields(object):
         #--- Get reference probe and reference brightnesses
         eigencharges_vs_gap = Spec.get_eigencharges_AWA(Nmodes=Nmodes)
         gaps = eigencharges_vs_gap.axes[1] # axes are eigenindex, coordinate, zprobe
-        Logger.write('Encoding eigenfields to gap=%1.2f across %i gap values from %s to %s...' \
+        Logger.write('Encoding eigenfields to gap=%1.2g across %i gap values from gap=%1.2g to %1.2g...' \
                      % ( gap0,len(gaps),gaps.min(),gaps.max() ) )
         ind0 = np.argmin( (gaps-gap0)**2 )
         gap0 = gaps[ind0]

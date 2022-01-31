@@ -534,7 +534,7 @@ class Probe(object):
 
     def getFourPotentialPropagators(self,k,farfield=False,\
                                  kappa_min=None,kappa_max=np.inf,Nkappas=244,\
-                                 qquadrature=numrec.TS,recompute=False):
+                                 qquadrature=numrec.GL,recompute=False):
         """
         Outputs a propagator for the scalar potential and for
         r- and z-components of the vector potential down to the plane at the tip apex.
@@ -656,7 +656,7 @@ class Probe(object):
     def getSommerfeldMirrorImpedance(self,k,gap=None,\
                                        recompute_rp=True,rp=None,rp_freq=None,
                                        recompute_propagators=False,farfield=False,
-                                       qquadrature=numrec.TS,Nkappas=244,\
+                                       qquadrature=numrec.GL,Nkappas=244,\
                                        kappa_min=None,kappa_max=np.inf,\
                                        **kwargs):
 
@@ -1097,7 +1097,7 @@ class Probe(object):
     def getFourPotentialAtZ(self,rs=np.logspace(-1,2,100),z=0,\
                             farfield=False,k=None,\
                             kappa_min=None,kappa_max=np.inf,Nkappas=244,
-                             qquadrature=numrec.TS):
+                             qquadrature=numrec.GL):
         
         #--- Obtain propagators
         gap=self.get_gap()
@@ -1139,7 +1139,7 @@ class Probe(object):
     def getRsampleMatrix(self,freq,gap,Nmodes=20,\
                    recompute_rp=True,rp=None,recompute_propagators=False,\
                     farfield=False,
-                   k=None,kappa_min=None,kappa_max=np.inf,qquadrature=numrec.TS,Nkappas=244,\
+                   k=None,kappa_min=None,kappa_max=np.inf,qquadrature=numrec.GL,Nkappas=244,\
                    **kwargs):
 
         # If a k-value for field evaluation is not specified, inherit from frequency and set the probe to that state
