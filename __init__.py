@@ -298,25 +298,31 @@ class Probe(object):
               'L':19e-4/30e-7,\
               'skin_depth':.05}
     
-    def __init__(self,Nnodes=244,L=None,quadrature=numrec.TS,\
+    def __init__(self,zs=None,rs=None,
+                 Nnodes=244,L=None,quadrature=numrec.TS,\
                  a=None,taper_angle=20,geometry='hyperboloid',Rtop=0,\
-                 freq=None,gap=None,Nsubnodes=6,closed=False):
+                 freq=None,gap=None,Nsubnodes=2,closed=False,**kwargs):
         
         if a is None: a=self.defaults['a']
         if L is None: L=self.defaults['L']
         self._a=a
-        node_zs,wzs=numrec.GetQuadrature(Nnodes,xmin=0,xmax=L,quadrature=quadrature)
-        self._wzs=wzs
-        
-        node_zs-=node_zs.min() #shift to lie on zero, this is the same thing LRM does
-        node_zs+=wzs[0]/2 #Displace value to half of lowest `wz` value
-        
-        node_rs=get_probe_radii(node_zs,L=L,z0=0,a=a,\
-                              taper_angle=taper_angle,\
-                              geometry=geometry,Rtop=Rtop)
+        if zs is None:
+            zs,wzs=numrec.GetQuadrature(Nnodes,xmin=0,xmax=L,quadrature=quadrature)
+            zs -= zs.min()
+            zs += wzs[0]/2 #Bring the "zero" coordinate where it belongs before evaluating geometry
 
-        self.Discretization = RotMoM.Discretization(node_rs,node_zs,L=L,\
-                                                    Nsubnodes=Nsubnodes,closed=closed,display=True)
+        if rs is not None: assert len(rs)==len(zs)
+        else:
+            if isinstance(geometry,str):
+                rs=get_probe_radii(zs,L=L,z0=0,a=a,\
+                                      taper_angle=taper_angle,\
+                                      geometry=geometry,Rtop=Rtop)
+            else:
+                assert hasattr(geometry,'__call__')
+                rs=geometry(zs,L=L,a=a,**kwargs)
+
+        self.Discretization = RotMoM.Discretization(rs,zs,closed=closed,\
+                                                    Nsubnodes=Nsubnodes,display=True)
         self.D=self.Discretization
 
         self._eigenrhos=None
@@ -336,6 +342,9 @@ class Probe(object):
     def set_freq(self,freq=None):
 
         if freq is None: freq=self.defaults['freq']
+        try:
+            if freq == self.get_freq(): return # Do nothing
+        except AttributeError: pass
                  
         self._freq=freq
         self._ZSelf=None #Re-set the self interaction
@@ -390,143 +399,6 @@ class Probe(object):
         dz = np.gradient(self.get_zs())
 
         return dR/dz
-
-    """
-    def build_interaction(self,kappa_min=None,kappa_max=np.inf,Nkappas=244,\
-                            qquadrature=numrec.TS,mirror=False,faraday=True,\
-                            NF=True,FF=False,rp=None,pulses=True,\
-                            **kwargs):
-        #TODO: re-figure with current as operand and port over to RotMOM
-
-        raise NotImplementedError
-        
-        from scipy.special import j0,j1
-        assert NF or FF
-        
-        #--- Get geometric parameters
-        gap=self.get_gap()
-        zs2=self.get_zs()+gap
-        rs=self.get_radii()
-        wzs=self.get_weights()
-        freq=self.get_freq()
-        k=self.get_k()
-        
-        if mirror:
-            Logger.write('Calculating mirror-interaction kernels in q-space at freq=%s...'%freq)
-            mirror_sign=-1
-        else:
-            Logger.write('Calculating self-interaction kernels in q-space at freq=%s...'%freq)
-            mirror_sign=+1
-        # Put source location at mirror location
-        zs1=mirror_sign*zs2
-        
-        T=Timer()
-        
-        drs=self.get_dRdz()
-        
-        #--- Build z-distance factors
-        Zs1=zs1[np.newaxis,:] #coordinates 1 along columns
-        Zs2=zs2[:,np.newaxis] #coordinates 2 along rows
-        dZs=np.abs(Zs2-Zs1)
-        dZs=dZs[:,:,np.newaxis]
-        
-        Rs1=rs[np.newaxis,:,np.newaxis]
-        Rs2=rs[:,np.newaxis,np.newaxis]
-        
-        dRs1=drs[np.newaxis,:]
-        dRs2=drs[:,np.newaxis]
-        
-        #--- Prepare Quadrature Grid
-        kappas=np.array([]); dkappas=np.array([])
-        if NF:
-            self.kappasNF=[]; self.dkappasNF=[]
-            
-            Logger.write('\tIncluding near-field component..')
-            #--- This block was standard practice
-            if kappa_min is None: kappa_min=self.get_kappa_min()
-            self.kappasNF,self.dkappasNF=numrec.GetQuadrature(xmin=kappa_min,
-                                                xmax=kappa_max,\
-                                                N=Nkappas,\
-                                                quadrature=qquadrature)
-            
-            kappas=np.append(self.kappasNF,kappas)
-            dkappas=np.append(self.dkappasNF,dkappas)
-        if FF:
-            Logger.write('\tIncluding far-field component..')
-            xmin=0
-            #xmin=np.min((.1/self.get_zs().max(),\
-            #             .1/k))
-            qs,dqs=numrec.GetQuadrature(xmin=xmin,xmax=k,\
-                                            N=Nkappas,\
-                                            quadrature=numrec.TS)
-                                            #quadrature=numrec.TS)
-            kzs=np.sqrt(k**2-qs**2)
-            self.kappasFF=-1j*kzs
-            self.dkappasFF=1j*qs/kzs*dqs
-            kappas=np.append(self.kappasFF,kappas) #Prepend our far-field bit to kappas
-            dkappas=np.append(self.dkappasFF,dkappas) #Prepend the measure of our far-field bit
-        
-        self.kappas=kappas
-        self.dkappas=dkappas
-        
-        #--- Implement any qs envelope function (e.g. rp) if we're doing mirror interaction
-        if mirror and rp:
-            qs=np.sqrt(kappas**2+k**2).real.astype(float)
-            rp_env=rp(freq,qs)
-            self.rp=AWA(rp_env,axes=[qs],axis_names=['q'])
-            dkappas=dkappas*rp_env
-        
-        Kappas=kappas[np.newaxis,np.newaxis,:]
-        dKappas=dkappas[np.newaxis,np.newaxis,:]
-        Qs=np.sqrt(Kappas**2+k**2).real.astype(float)
-        
-        #--- Handle the exponential z-dependence
-        Exp=np.exp(-Kappas*dZs)
-        if pulses:
-            Wzs1=self.get_weights()[:,np.newaxis,np.newaxis]
-            Wzs2=self.get_weights()[np.newaxis,:,np.newaxis]
-            KWzs1=Kappas*Wzs1; KWzs2=Kappas*Wzs2
-            pulse_mult1=np.sinh(KWzs1/2)/(KWzs1/2) #This is the formula from mathematica
-            pulse_mult2=np.sinh(KWzs2/2)/(KWzs2/2) #This is the formula from mathematica
-            pulse_prod=pulse_mult1*pulse_mult2 #This is the formula from mathematica for double integration
-            pulse_prod[~np.isfinite(pulse_prod)]=1 #We expect numerical overflow where the ratio approaches 1
-            Exp*=pulse_prod 
-        if pulses and not mirror:
-            # Handle the diagonal components where `z1=z2` which will lead to non-convergent `kappa`-integral
-            # Integrate this element explicitly
-            Exp_diag = np.einsum('iij->ij', Exp) #This is a writeable slice of `Exp` where z1=z2
-            wzq=wzs[:,np.newaxis]*Kappas[np.newaxis,:]
-            Exp_diag[:] = (1-np.exp(-wzq/2))/(wzq/2) #this is integrating `exp(-kappa*|z|)` from `+/- wz/2`, divided by `wz`
-            self.Exp_diag=Exp_diag
-        self.Exp=Exp
-        
-        #--- Coulomb kernel
-        CoulKernel=j0(Qs*Rs1)*j0(Qs*Rs2)*Exp
-        CoulKernel=np.sum(dKappas*CoulKernel,axis=-1)
-        CoulKernel=np.matrix(CoulKernel)
-        
-        #--- Vector potential (Faraday) kernel
-        if faraday:
-            TransFaradKernel = j1(Qs*Rs1)*j1(Qs*Rs2)*Exp
-            TransFaradKernel = np.sum(dKappas*TransFaradKernel,axis=-1)
-            FaradKernel = CoulKernel - mirror_sign*dRs1*dRs2*TransFaradKernel #Reverse sign of transverse current
-            #FaradKernel = CoulKernel + mirror_sign*dRs1*dRs2*TransFaradKernel #Reverse sign of transverse current
-            #CHECK SIGN IN FRONT OF `TransFaradKernel`
-            FaradKernel = np.matrix(FaradKernel)
-            
-            #Get partial integration matrix
-            WUpperTri=self.get_WUpperTri_matrix()
-            WLowerTri=WUpperTri.T
-    
-            #Integrate both variables to obtain radiative kernel
-            RadiativeKernel = -k**2*(WLowerTri @ FaradKernel @ WUpperTri) #TODO: should be minus
-        else: RadiativeKernel=0
-        
-        CoulKernel*=mirror_sign #Reverse sign of charge
-        Logger.write('\t'+T())
-        
-        return CoulKernel + RadiativeKernel
-        """
 
     #--- Momentum space propagators & reflectance
 
@@ -801,7 +673,7 @@ class Probe(object):
             if plot:
                 plt.figure()
                 plt.plot(ea, marker='o')
-                plt.gca().set_yscale('symlog', linthreshy=1e-20)
+                plt.gca().set_yscale('symlog', linthresh=1e-20)
                 plt.axhline(ZSthresh, ls='--')
                 plt.title('Pos. def. spectrum: `-Im(self impedance)`')
             where_good = ea/ea.real.max() > ZSthresh
@@ -903,7 +775,7 @@ class Probe(object):
         np.imag(rhos).plot(marker='o',color='b',label=r'Im($\rho$)')
         plt.xlim(-.5,xmax)
         plt.ylim(-ymax,ymax)
-        plt.gca().set_yscale('symlog',linthreshy=1e-1)
+        plt.gca().set_yscale('symlog',linthresh=1e-1)
         plt.legend()
         plt.axhline(0)
         plt.title('Min. eigenvalue: %1.2E+%1.2Ej'%(rhos[0].real,rhos[0].imag))

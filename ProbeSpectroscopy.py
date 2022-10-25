@@ -13,7 +13,7 @@ def get_superset_indices(subset,superset):
 
     subset=np.array(subset); superset=np.array(superset)
     assert len(set(subset))==len(subset), 'All elements of `subset` must be unique!'
-    assert len(set(superset))==len(superset), 'All elements of `subset` must be unique!'
+    assert len(set(superset))==len(superset), 'All elements of `superset` must be unique!'
     assert len(set(subset).intersection(superset))==len(subset), '`subset` must be entirely within `superset`!'
 
     #-- It's still possible that superset contains an element of subset more than once..
@@ -83,9 +83,14 @@ class ProbeSpectroscopy(object):
 
         return self.get_probe()
 
-    def distance(self, xm, xn, m, n):
+    def distance(self, xm, xn, m, n, by_eigenrho=True):
         """Get 'distance' between eigencharge at coordinate `xm`, index `m`,
         and that at coordinate `xn`, index `n`."""
+
+        if by_eigenrho:
+            rho_m = self._recorded_eigenrhos[xm][m]
+            rho_n = self._recorded_eigenrhos[xn][n]
+            return np.abs(rho_m-rho_n)
 
         Qm = self._recorded_eigencharges[xm][m]
         Qn = self._recorded_eigencharges[xn][n]
@@ -123,7 +128,7 @@ class ProbeSpectroscopy(object):
 
         return distance
 
-    def classify_eigensets(self, Nmodes=10, reversed=False):
+    def classify_eigensets(self, Nmodes=10, reversed=False, **kwargs):
         # This is the robust way of labeling eigensets by an eigenindex
         # in a way that is uniform across the internal coordinates
         # `reversed` is untested
@@ -149,7 +154,8 @@ class ProbeSpectroscopy(object):
 
                 connections = []
                 for n in range(N):
-                    ds = [self.distance(coord_prev, coord, m, n) for m in range(M)]
+                    ds = [self.distance(coord_prev, coord, m, n,
+                                        **kwargs) for m in range(M)]
                     m = np.argmin(ds)
                     connections.append(connectivity[coordind - 1][m])
 
@@ -194,6 +200,7 @@ class ProbeSpectroscopy(object):
         #--- Find coordinates that are common to all eigensets
         #  since some eigensets may have been dropped during the sorting process
         coords = [rhos.axes[0] for rhos in self.sorted_eigenrhos[:Nmodes]]
+        Nmodes=len(coords)
         coords_common = sorted(list(set(coords[0]).intersection(*coords[1:])))
         if verbose:
             Logger.write('For Nmodes=%i, there were %i identifiable mutual coordinates.'%(Nmodes,len(coords_common)))
@@ -247,6 +254,7 @@ class ProbeSpectroscopy(object):
         #--- Find coordinates that are common to all eigensets
         #  since some eigensets may have been dropped during the sorting process
         coords = [ rhos.axes[0] for rhos in self.sorted_eigenrhos[:Nmodes] ]
+        Nmodes = len(coords)
         coords_common = sorted(list(set(coords[0]).intersection(*coords[1:])))
         if verbose:
             Logger.write('For Nmodes=%i, there were %i mutual spectroscopy coordinates.'%(Nmodes,len(coords_common)))
@@ -258,7 +266,6 @@ class ProbeSpectroscopy(object):
         eigencharges_grid = [ charges[ind_set] for charges, ind_set \
                               in zip(self.sorted_eigencharges[:Nmodes], \
                                      ind_sets) ]
-        len(eigencharges_grid)
 
         if verbose: Logger.write('\tAligning eigencharge signage...')
         eigencharges_grid = [ self.align_eigencharge_signs(eigencharges,\
@@ -273,7 +280,8 @@ class ProbeSpectroscopy(object):
 
         return eigencharges_AWA #Axes are eigenindex, coordinate, z-on-probe
 
-    def get_brightnesses_AWA(self,Nmodes=None,recompute=False,\
+    def get_brightnesses_AWA(self,Nmodes=None,recompute=False, \
+                             eigencharges_AWA=None,
                              angles=np.linspace(10,80,20),**kwargs):
 
         try:
@@ -281,7 +289,8 @@ class ProbeSpectroscopy(object):
             return self._brightesses_AWA
         except AttributeError: pass #proceed to evaluate
 
-        eigencharges_AWA = self.get_eigencharges_AWA(Nmodes,verbose=False)
+        if eigencharges_AWA is None:
+            eigencharges_AWA = self.get_eigencharges_AWA(Nmodes,verbose=False)
         coords=eigencharges_AWA.axes[1]
         Nmodes=len(eigencharges_AWA)
 
@@ -395,7 +404,7 @@ def compute_eigenset_at_gap(P, gap=1, k=0, sommerfeld=True, **kwargs):
         P.set_gap(gap)
         if k is None: k=P.get_k()
 
-        # Use sommerfeld calculation because it's faster
+        # Use sommerfeld calculation because it's faster; q-grid is adaptive
         if sommerfeld and 'kappa_max' not in kwargs:
             kwargs['kappa_max'] = 10*np.max( (1/gap, 1/P.get_a()) )
         Zmirror = P.get_mirror_impedance(k=k, recompute=True, sommerfeld=sommerfeld, **kwargs)
@@ -489,7 +498,8 @@ class ProbeGapSpectroscopyParallel(ProbeSpectroscopyParallel):
 
     def __init__(self,P, gaps=np.logspace(-1.5,1,100),\
                  ncpus=8, backend='multiprocessing',\
-                 Nmodes=20, sommerfeld=True, **kwargs):
+                 Nmodes=20, sommerfeld=True, reversed=False,
+                 **kwargs):
 
         #--- Make sure self impedance has been calculated
 
@@ -497,7 +507,7 @@ class ProbeGapSpectroscopyParallel(ProbeSpectroscopyParallel):
         #--- Hard-code the gap calculator
         kwargs['k'] = 0 #we insist on a quasistatic calculation, otherwise some features of this class become meaningless
         super().__init__(P, coords=gaps, eigenset_calculator=compute_eigenset_at_gap,
-                         ncpus=ncpus, backend=backend, Nmodes=Nmodes, reversed=True,
+                         ncpus=ncpus, backend=backend, Nmodes=Nmodes, reversed=reversed,
                          sommerfeld=sommerfeld,**kwargs)
 
 class EncodedEigenfields(object):
@@ -556,7 +566,8 @@ class EncodedEigenfields(object):
             PsiMats.append(PsiMat)
 
         #--- Package results
-        Brightnesses = Spec.get_brightnesses_AWA(Nmodes=None, recompute=False,
+        Brightnesses = Spec.get_brightnesses_AWA(Nmodes=Nmodes, recompute=False,
+                                                 eigencharges_AWA = eigencharges_vs_gap,
                                                  **brightnesskwargs)[:Nmodes].T #Put coordinate (gaps) axis first
         Poles = Spec.get_eigenrhos_AWA(Nmodes=Nmodes, verbose=False).T #Put coordinate (gaps) axis first
         PsiMats = AWA(PsiMats, axes=[gaps, None,None],

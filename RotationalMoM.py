@@ -680,39 +680,44 @@ def get_probe_radii(zs,L=1000,z0=0,a=1,taper_angle=20,geometry='cone',Rtop=0):
 
 class Discretization(object):
 
-    def __init__(self,node_Rs,node_zs,L,Nsubnodes=6,closed=False,display=True):
+    def __init__(self,Rs,zs,Nsubnodes=6,closed=False,display=True):
 
-        # --- Define nodal coordinates and intervals
-        assert len(node_Rs) == len(node_zs)
-        self.Nnodes = len(node_zs)
+        # --- Checks
+        assert len(Rs) == len(zs)
+        assert np.min(Rs)>0 and np.min(zs)>=0
         assert not Nsubnodes % 2, 'Number of subnode divisions must be even!'
         self.Nsubnodes = Nsubnodes
 
-        if display: Logger.write('Discretizing body of revolution over %i annular nodes and %i subnodes...'\
-                                 %(self.Nnodes,self.Nsubnodes))
-        self.node_Rs = np.array(node_Rs)
-        self.node_zs = np.array(node_zs)
-        self.node_terminal_zs = np.array([0] + list(self.node_zs) + [L])
-        self.node_interval_dzs = np.diff(self.node_terminal_zs)  # spacing between nodes, of length Nzs+1
-
-        # --- Interpolator for radius throughout interior to terminal points
+        #--- Enforce open or closed geometry
         # radii of origin + nodes + terminus, of length Nnodes+2
         if closed:
-            self.node_terminal_Rs = np.array([0] \
-                                        + list(self.node_Rs) \
-                                        + [0])  # closed geometry
-        else:
-            terminal_dz = self.node_interval_dzs[-1]
-            dRdz = np.diff(self.node_Rs)[-1] / np.diff(self.node_zs)[-1]
-            terminal_dR = dRdz * terminal_dz
-            self.node_terminal_Rs = np.array([self.node_Rs[0]] \
-                                        + list(self.node_Rs) \
-                                        + [self.node_Rs[-1] + terminal_dR])  # open geometry
-        from scipy.interpolate import interp1d
-        self.interpR = interp1d(self.node_terminal_zs, self.node_terminal_Rs, \
-                                 kind='cubic', bounds_error=False, fill_value=0)
+            Rmin = np.min(Rs)*1e-2
+            if Rs[0]!=0:
+                dzdR = np.diff(zs)[0]/np.diff(Rs)[0]
+                z0 = -dzdR * Rs[0]
+                zs = np.append([z0], zs)
+                Rs = np.append([Rmin], Rs)
+                zs -= z0 #In case our preprended z0 went negative
+            if Rs[-1]!=0:
+                dzdR = np.diff(zs)[-1]/np.diff(Rs)[-1]
+                zT = +dzdR * Rs[-1]
+                zs = np.append(zs, [zT])
+                Rs = np.append(Rs, [Rmin])
 
-        # --- Evaluate all subnode coordinates and internal intervals\
+        # --- Assign node coordinates and internal intervals
+        self.node_terminal_Rs = Rs #Use whatever terminal values were supplied
+        self.node_terminal_zs = zs  # Use whatever terminal values were supplied
+        self.node_Rs = np.array(Rs[1:-1]) #Internal points comprise the nodes
+        self.node_zs = np.array(zs[1:-1])
+        self.Nnodes = len(self.node_zs)
+        if display: Logger.write('Discretizing body of revolution over %i annular nodes and %i subnodes...'\
+                                 %(self.Nnodes,self.Nsubnodes))
+
+        self.node_terminal_zs = zs
+        self.node_interval_dzs = np.diff(self.node_terminal_zs)  # spacing between nodes, of length `Nnodes+1`
+        self.node_interval_dRs = np.diff(self.node_terminal_Rs)  # spacing between nodes, of length `Nnodes+1`
+
+        # --- Evaluate all subnode coordinates and internal intervals
         self.pvals, self.pweights = numrec.GetQuadrature(xmin=-1, xmax=+1, quadrature='linear', N=self.Nsubnodes)
         self.Nsubnodes = len(self.pvals)
 
@@ -729,19 +734,17 @@ class Discretization(object):
                 pval = self.pvals[p]
                 dp = self.pweights[p]
 
-                if pval < 0: dz = self.node_interval_dzs[i]
-                elif pval > 0: dz = self.node_interval_dzs[i + 1]
+                if pval < 0:
+                    dz = self.node_interval_dzs[i]
+                    dR = self.node_interval_dRs[i]
+                else:
+                    dz = self.node_interval_dzs[i + 1]
+                    dR = self.node_interval_dRs[i + 1]
                 self.subnode_dzs[i, p] = dzp = dp * dz
-                self.subnode_zs[i, p] = zp = self.node_zs[i] + pval * dz
+                self.subnode_zs[i, p] = self.node_zs[i] + pval * dz
+                self.subnode_dRs[i, p] = dRp = dp * dR
+                self.subnode_Rs[i, p] = self.node_Rs[i] + pval * dR
 
-                zs_eval = zp + np.array([-.5, 0, .5]) * dzp
-                #if zs_eval[-1]>L: zs_eval[-1] = L
-                #if zs_eval[0]<0: zs_eval[0] = 0
-                R1, Rp, R2 = self.interpR( zs_eval )  # This evaluates *in between* the adjacent subnodes
-
-                self.subnode_Rs[i, p] = Rp
-
-                self.subnode_dRs[i, p] = dRp = R2 - R1
                 self.subnode_dts[i, p] = dtp = np.sqrt(dRp ** 2 + dzp ** 2)
 
                 self.subnode_sin[i, p] = dRp / dtp  # opp/hyp
@@ -751,7 +754,7 @@ class Discretization(object):
         # Integrate subnode dts between nodes (pval<0), length will be `Nnodes + 1`
         node_interval_dts = np.sum(self.subnode_dts[:, self.pvals < 0], axis=-1)
         self.node_interval_dts = np.append(node_interval_dts,
-                                              [np.sum(self.subnode_dts[-1, self.pvals > 0], \
+                                              [np.sum(self.subnode_dts[-1, self.pvals > 0],
                                                       axis=-1)])  # add the interval between final node and terminus
 
         self.subnode_Ts = np.zeros(subnode_shape)
@@ -763,7 +766,7 @@ class Discretization(object):
                 self.subnode_Ts[i,p] = 1 - np.abs(pval)  # Equals 1/2 at pval=+/-1/2
 
                 if pval < 0: dt = self.node_interval_dts[i]
-                elif pval > 0:  dt = self.node_interval_dts[i + 1]
+                else:  dt = self.node_interval_dts[i + 1]
                 # Equals +/- 1/dt; this way integrates to 1 over `t \in [ -dt[i],dt[i+1] ]` (pval=-/+1)
                 self.subnode_dTdts[i,p] = -np.sign(pval) / dt
 
@@ -896,13 +899,13 @@ def ImpedanceMatrix(D,k,gap=1, mirror=False,\
                             G_coul=G_farad=0
 
                         elif dz < 1e-6 * Rp: #this implies p=q, dp=dq, and Rp=Rq, wz1=wz2 etc.
-                            G_coul = CoulSingDiag(Rp, drdzp, dzp, k)
+                            G_coul = CoulSingDiag(Rp, drdzp, np.abs(dzp), k)
                             diag_G_couls.append(G_coul)
-                            if nonsingular: G_coul += CoulNonsingDiag(Rp, drdzp, dzp, k)
+                            if nonsingular: G_coul += CoulNonsingDiag(Rp, drdzp, np.abs(dzp), k)
 
-                            G_farad = ArSingDiag(Rp, drdzp, dzp, k)
+                            G_farad = ArSingDiag(Rp, drdzp, np.abs(dzp), k)
                             diag_G_farads.append(G_farad)
-                            if nonsingular: G_farad += ArNonsingDiag(Rp, drdzp, dzp, k)
+                            if nonsingular: G_farad += ArNonsingDiag(Rp, drdzp, np.abs(dzp), k)
 
                         else:
                             G_coul = CoulSingOffdiag(Rp, Rq, dz, k)
