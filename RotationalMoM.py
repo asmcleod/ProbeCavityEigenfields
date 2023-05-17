@@ -794,8 +794,9 @@ class Discretization(object):
         Ezs = Ez(Rs_flat,zs_flat).reshape( (self.Nnodes,self.Nsubnodes) )
         Ers = Er(Rs_flat,zs_flat).reshape( (self.Nnodes,self.Nsubnodes) )
         Ets = Ezs * self.subnode_cos + Ers * self.subnode_sin
-        Vts = np.sum( Ets * self.subnode_Ts * self.subnode_dts, axis=-1) #integrate along tangent direction
+        Vts = np.sum( Ets * self.subnode_Ts * self.subnode_dts, axis=-1) #for each node, integrate all subnodes
 
+        # Return the "generalized potential" across each node
         return np.matrix( Vts ).T #Remember that we will want `j = solve(Z, -excitation)`
 
 def ImpedanceMatrix(D,k,gap=1, mirror=False,\
@@ -918,8 +919,8 @@ def ImpedanceMatrix(D,k,gap=1, mirror=False,\
                         G_coul_cache[Gkey] = G_coul
                         G_farad_cache[Gkey] = G_farad
 
-                    val = ( k**2 * Tp*Tq * (Sp * Sq * G_farad * mirror_sign \
-                                                     + Cp * Cq * G_coul) \
+                    val = ( k**2 * Tp*Tq * (Sp * Sq * G_farad * mirror_sign
+                                                     + Cp * Cq * G_coul)
                              - dTdtp * dTdtq * G_coul * mirror_sign)
 
                     if np.isnan(val): raise ValueError
@@ -931,7 +932,7 @@ def ImpedanceMatrix(D,k,gap=1, mirror=False,\
         Logger.write('\tTotal quadrature time: %1.2fs, time per quadrature evaluation: %1.2Es' % (dt, dt / D.Nnodes ** 2))
 
     triu_inds = np.triu_indices(D.Nnodes, k=1)
-    tril_inds = [triu_inds[1], triu_inds[0]]
+    tril_inds = (triu_inds[1], triu_inds[0])
     Zmat[tril_inds] = Zmat[triu_inds]
 
     #alpha = (4*np.pi) #/k_alpha

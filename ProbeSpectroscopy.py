@@ -1,6 +1,8 @@
 import numpy as np
 import time
 from numbers import Number
+from scipy import linalg
+from scipy.signal import invres,unique_roots
 from common.log import Logger
 from common import plotting
 from common import numerical_recipes as numrec
@@ -141,6 +143,7 @@ class ProbeSpectroscopy(object):
         # --- Assign labels to modes
         connectivity = []
         for coordind in range(len(coords)):
+            print('Measuring distances at coordinate index %i of %i...'%(coordind,len(coords)))
 
             coord = coords[coordind]
             N = np.min((Nmodes, len(self._recorded_eigenrhos[coord])))
@@ -154,6 +157,7 @@ class ProbeSpectroscopy(object):
 
                 connections = []
                 for n in range(N):
+                    print('Measuring distances to eigenset %i of %i...'%(n,N))
                     ds = [self.distance(coord_prev, coord, m, n,
                                         **kwargs) for m in range(M)]
                     m = np.argmin(ds)
@@ -192,7 +196,14 @@ class ProbeSpectroscopy(object):
 
     def __call__(self,*args,**kwargs): return self.classify_eigensets(*args,**kwargs)
 
-    def get_eigenrhos_AWA(self,Nmodes=10,verbose=True):
+    def get_eigenrhos_AWA(self,Nmodes=10,recompute=False,verbose=True):
+
+        try:
+            precomputed = self._eigenrhos_AWA
+            if Nmodes != len(precomputed) or recompute: #If we need more modes than we have, also recompute
+                raise AttributeError
+            return precomputed
+        except AttributeError: pass #proceed to evaluate
 
         if self.sorted_eigenrhos is None:
             raise RuntimeError('Call the spectroscopy instance first (i.e. `Spectroscopy()` ) to sort eigensets!')
@@ -213,10 +224,10 @@ class ProbeSpectroscopy(object):
                           in zip(self.sorted_eigenrhos[:Nmodes],\
                                  ind_sets)]
 
-        eigenrhos_grid = AWA(eigenrhos_grid,axes=[None,coords_common],\
-                             axis_names=['eigenindex','coordinate'])
+        self._eigenrhos_AWA = AWA(eigenrhos_grid,axes=[None,coords_common],\
+                                  axis_names=['eigenindex','coordinate'])
 
-        return eigenrhos_grid
+        return self._eigenrhos_AWA
 
     def align_eigencharge_signs(self,eigencharges, coords, eigenindex):
         """Align a set of `eigencharges` all at `eigenindex` but varying across `coords`
@@ -239,14 +250,22 @@ class ProbeSpectroscopy(object):
             Oavg = (Om + On) / 2
 
             # If overlap is negative, the added charge needs to be flipped in sign
-            overlap = np.complex( Qm.T @ Oavg @ Qn )
+            overlap = complex( Qm.T @ Oavg @ Qn )
             if overlap.real<0: charge_to_add = -charge_to_add
 
             aligned_eigencharges.append(charge_to_add)
 
         return aligned_eigencharges
 
-    def get_eigencharges_AWA(self,Nmodes=10,verbose=True):
+    def get_eigencharges_AWA(self,Nmodes=10,recompute=False,
+                             verbose=True):
+
+        try:
+            precomputed = self._eigencharges_AWA
+            if Nmodes != len(precomputed) or recompute: #If we need more modes than we have, also recompute
+                raise AttributeError
+            return precomputed
+        except AttributeError: pass #proceed to evaluate
 
         if self.sorted_eigenrhos is None:
             raise RuntimeError('Call the spectroscopy instance first (i.e. `Spectroscopy()` ) to sort eigensets!')
@@ -257,7 +276,7 @@ class ProbeSpectroscopy(object):
         Nmodes = len(coords)
         coords_common = sorted(list(set(coords[0]).intersection(*coords[1:])))
         if verbose:
-            Logger.write('For Nmodes=%i, there were %i mutual spectroscopy coordinates.'%(Nmodes,len(coords_common)))
+            Logger.write('Obtaining eigencharges for Nmodes=%i, across  %i mutual spectroscopy coordinates.'%(Nmodes,len(coords_common)))
 
         ind_sets = [ get_superset_indices(subset=coords_common,\
                                          superset=coord_set) \
@@ -273,28 +292,37 @@ class ProbeSpectroscopy(object):
                                                            eigenindex=eigenindex) \
                               for eigenindex,eigencharges in enumerate(eigencharges_grid) ]
 
-        eigencharges_AWA = AWA(eigencharges_grid,axes=[None,coords_common,\
-                                                        eigencharges_grid[0][0].axes[0]],\
-                             axis_names=['eigenindex','coordinate',\
-                                         eigencharges_grid[0][0].axis_names[0]])
+        self._eigencharges_AWA = AWA(eigencharges_grid,axes=[None,coords_common,\
+                                                            eigencharges_grid[0][0].axes[0]],\
+                                     axis_names=['eigenindex','coordinate',\
+                                                 eigencharges_grid[0][0].axis_names[0]])
 
-        return eigencharges_AWA #Axes are eigenindex, coordinate, z-on-probe
+        return self._eigencharges_AWA #Axes are eigenindex, coordinate, z-on-probe
 
-    def get_brightnesses_AWA(self,Nmodes=None,recompute=False, \
+    def get_brightnesses_AWA(self,Nmodes=None,recompute=False,
+                             recompute_eigencharges=False,
                              eigencharges_AWA=None,
-                             angles=np.linspace(10,80,20),**kwargs):
+                             angles=np.linspace(10,80,20),
+                             verbose=True,**kwargs):
 
         try:
-            if recompute: raise AttributeError
-            return self._brightesses_AWA
-        except AttributeError: pass #proceed to evaluate
+            precomputed = self._brightnesses_AWA
+            if (Nmodes and Nmodes != len(precomputed)) or recompute: #If we need more modes than we have, also recompute
+                raise AttributeError
+            return precomputed
+        except AttributeError:
+            import traceback
+            pass #proceed to evaluate
 
         if eigencharges_AWA is None:
-            eigencharges_AWA = self.get_eigencharges_AWA(Nmodes,verbose=False)
+            eigencharges_AWA = self.get_eigencharges_AWA(Nmodes,
+                                                         recompute=recompute_eigencharges,
+                                                         verbose=verbose)
         coords=eigencharges_AWA.axes[1]
-        Nmodes=len(eigencharges_AWA)
+        if Nmodes:
+            eigencharges_AWA = eigencharges_AWA[:Nmodes]
 
-        Logger.write('Computing brightnesses across %i spectroscopy coordinates...'%len(coords))
+        if verbose: Logger.write('Computing brightnesses across %i spectroscopy coordinates...'%len(coords))
 
         all_brightnesses=[]
         for coord in coords:
@@ -304,8 +332,8 @@ class ProbeSpectroscopy(object):
                             for charge in eigencharges]
             all_brightnesses.append(brightnesses)
 
-        self._brightnesses_AWA = AWA(all_brightnesses,\
-                                          axes=[coords,None],\
+        self._brightnesses_AWA = AWA(all_brightnesses,
+                                          axes=[coords,None],
                                           axis_names=['coordinate','eigenindex']).T #transpose to conform with previous convention
 
         return self._brightnesses_AWA
@@ -494,6 +522,21 @@ def get_cheb_zs_weights(Ncheb=8, A=2, gapmin=.1, demod_order=5):
 
     return zs_ev, weights
 
+class ProbeFrequencySpectroscopyParallel(ProbeSpectroscopyParallel):
+
+    def __init__(self,P, freqs,
+                 ncpus=8, backend='multiprocessing',
+                 Nmodes=20, reversed=False,
+                 **kwargs):
+
+        #--- Make sure mirror impedance has been calculated
+        Zmirror = P.get_mirror_impedance(k=0, recompute=True, sommerfeld=False)
+
+        #--- Hard-code the frequency calculator
+        super().__init__(P, coords=freqs, eigenset_calculator=compute_eigenset_at_freq,
+                         ncpus=ncpus, backend=backend, Nmodes=Nmodes, reversed=reversed,
+                         PhiM=False, **kwargs)
+
 class ProbeGapSpectroscopyParallel(ProbeSpectroscopyParallel):
 
     def __init__(self,P, gaps=np.logspace(-1.5,1,100),\
@@ -503,12 +546,11 @@ class ProbeGapSpectroscopyParallel(ProbeSpectroscopyParallel):
 
         #--- Make sure self impedance has been calculated
 
-
         #--- Hard-code the gap calculator
         kwargs['k'] = 0 #we insist on a quasistatic calculation, otherwise some features of this class become meaningless
         super().__init__(P, coords=gaps, eigenset_calculator=compute_eigenset_at_gap,
                          ncpus=ncpus, backend=backend, Nmodes=Nmodes, reversed=reversed,
-                         sommerfeld=sommerfeld,**kwargs)
+                         sommerfeld=sommerfeld, **kwargs)
 
 class EncodedEigenfields(object):
     """This function condensed a `ProbeSpectroscopy` object
@@ -531,7 +573,7 @@ class EncodedEigenfields(object):
         #assert isinstance(Spec,ProbeSpectroscopy)
 
         #--- Get reference probe and reference brightnesses
-        eigencharges_vs_gap = Spec.get_eigencharges_AWA(Nmodes=Nmodes)
+        eigencharges_vs_gap = Spec.get_eigencharges_AWA(Nmodes=Nmodes,recompute=False)
         gaps = eigencharges_vs_gap.axes[1] # axes are eigenindex, coordinate, zprobe
         Logger.write('Encoding eigenfields to gap=%1.2g across %i gap values from gap=%1.2g to %1.2g...' \
                      % ( gap0,len(gaps),gaps.min(),gaps.max() ) )
@@ -652,8 +694,7 @@ class EncodedEigenfields(object):
             if isinstance(rp,Number): rp_vs_q=rp
             else:
                 rp_vs_q = rp(freq, qs, **kwargs) #rp will have to anticipate dimensionless arguments
-                rp_vs_q[np.isnan(rp_vs_q)] = 0  # This is just probably trying to evaluate at too large a momentum
-                rp_vs_q[np.isinf(rp_vs_q)] = 0  # This is just probably trying to evaluate at too large a momentum
+                rp_vs_q[np.isnan(rp_vs_q)+np.isinf(rp_vs_q)] = 0  # This is just probably trying to evaluate at too large a momentum
             RMat0 = Phi0Vecs.T @ np.diag(dkappas * rp_vs_q) @ Phi0Vecs
         else:
             assert RMat0.shape == PsiMats[0].shape,\
@@ -667,11 +708,15 @@ class EncodedEigenfields(object):
             PoleMat=PoleMats[igap]
 
             RMat = PsiMat.T @ RMat0 @ PsiMat
-            Erad = BVec.T @ \
+            """Erad = BVec.T @ \
                       ( (RMat - PoleMat).I + (PoleMat).I ) \
-                        @ BVec  # scattering/summing etc. is implicit
+                        @ BVec  # scattering/summing etc. is implicit"""
+            Erad = BVec.T @ \
+                   ( linalg.solve(RMat - PoleMat, BVec)
+                    + linalg.solve(PoleMat, BVec) ) # Same as matrix inverse; should boost performance in longer runs
+            # scattering/summing etc. is implicit
 
-            Erads.append( np.complex(Erad) )
+            Erads.append( complex(Erad) )
 
         return AWA(Erads, axes=[at_gaps], axis_names=['gap'])
 
@@ -726,9 +771,451 @@ class EncodedEigenfields(object):
 
         return result
 
+    def getNormalizedSignal(self,freqs_wn,rp,
+                            a_nm=30,amplitude_nm=50,demod_order=5,
+                            Ngaps=24*4,gapmin=.15,
+                            rp_norm = None,
+                            freqs_wn_norm = None):
+
+        # Wrap the provided rp functions so they can expand out dimensionless frequencies and wavevectors
+        # The supplied reflection function should take `frequency (wavenumbers), q (wavenumbers)`
+        rp_wrapped = lambda freq,q: rp( freq / (a_nm * 1e-7),
+                                        q / (a_nm * 1e-7))
+        if rp_norm is None:
+            from NearFieldOptics import Materials as M
+            rp_norm = M.Au.reflection_p
+        rp_norm_wrapped = lambda freq,q: rp_norm( freq / (a_nm * 1e-7),
+                                                 q / (a_nm * 1e-7))
+        amplitude = amplitude_nm / a_nm
+        freqs = freqs_wn * (a_nm * 1e-7)
+        if freqs_wn_norm is None: freqs_wn_norm = np.mean(freqs_wn)
+        freqs_norm = freqs_wn_norm * (a_nm * 1e-7)
+
+        signals = self.EradSpectrumDemodulated(freqs, rp=rp_wrapped,
+                                               gapmin=gapmin, amplitude=amplitude,
+                                               Ngaps=Ngaps, demod_order=demod_order)
+        signals_ref = self.EradSpectrumDemodulated(freqs=freqs_norm, rp=rp_norm_wrapped,
+                                                   gapmin=gapmin, amplitude=amplitude,
+                                                   Ngaps=Ngaps, demod_order=demod_order)
+        signals['Sn'] /= signals_ref['Sn']
+        signals['Sn'].set_axes([None,freqs_wn],
+                               axis_names=[None,'Frequency (cm$^{-1}$)'])
+        signals['Erad'].set_axes([None,freqs_wn],
+                                 axis_names=[None,'Frequency (cm$^{-1}$)'])
+
+        return signals
+
     def getBasisFourPotentialAtZ(self, *args,**kwargs):
 
         return self.Probe.getFourPotentialAtZ(*args,**kwargs)
 
+#------- Tools for inversion
 
+def companion_matrix(p):
+    """Assemble the companion matrix associated with a polynomial
+    whose coefficients are given by `poly`, in order of decreasing
+    degree.
+
+    Currently unused, but might find a role in a custom polynomial
+    root-finder.
+
+    References:
+    1) http://en.wikipedia.org/wiki/Companion_matrix
+    """
+
+    A = np.diag(np.ones((len(p) - 2,), np.complex128), -1)
+    A[0, :] = -p[1:] / p[0]
+
+    return np.matrix(A)
+
+def find_roots(p, scaling=10):
+    """Find roots of a polynomial with coefficients `p` by
+    computing eigenvalues of the associated companion matrix.
+
+    Overflow can be avoided during the eigenvalue calculation
+    by preconditioning the companion matrix with a similarity
+    transformation defined by scaling factor `scaling` > 1.
+    This transformation will render the eigenvectors in a new
+    basis, but the eigenvalues will remain unchanged.
+
+    Empirically, `scaling=10` appears to enable successful
+    root-finding on polynomials up to degree 192."""
+
+    scaling = np.float64(scaling)
+    M = companion_matrix(p)
+    N = len(M)
+    D = np.matrix(np.diag(scaling ** np.arange(N)))
+    Dinv = np.matrix(np.diag((1 / scaling) ** np.arange(N)))
+    Mstar = Dinv * M * D  # Similarity transform will leave the eigenvalues unchanged
+
+    return linalg.eigvals(Mstar)
+
+
+class InvertibleEigenfields(object):
+    verbose = True
+
+    def __init__(self, GapSpec, Nmodes=20,
+                 interpolation='cubic',**kwargs):
+        """For some reason using Nqs>=244, getting higher q-resolution,
+        only makes more terms relevant, requiring twice as many terms for
+        stability and smoothness in approach curves...
+        (although overall """
+
+        Brightnesses = GapSpec.get_brightnesses_AWA(Nmodes=Nmodes, recompute=False).T  # Put coordinate (gaps) axis first
+        self.Rs = Brightnesses**2 #@TODO: Might want to double check this
+        self.Ps = GapSpec.get_eigenrhos_AWA(Nmodes=Nmodes, verbose=False,recompute=False).T  # Put coordinate (gaps) axis first
+
+        self.Nmodes = self.Rs.shape[1]
+        self.zs = self.Rs.axes[0]
+
+        self.build_poles_residues_interpolator(interpolation=interpolation,**kwargs)
+
+    def polyfit_poles_residues(self, deg=6, zmax=None):
+        #This is just in case we want to export later a better parametrization of the poles / residues vs. distance
+        #But should change to Padé approximant
+
+        if not zmax: zmax=np.max(self.zs)
+        Nterms = self.Ps.shape[1]
+        Rs = self.Rs.cslice[:zmax]
+        Ps = self.Ps.cslice[:zmax]
+        zs = Rs.axes[0]
+
+        if self.verbose:
+            Logger.write('Finding complex polynomial approximations of degree %i ' % deg + \
+                         'to the first %i poles and residues, up to a value z/a=%s...' % (Nterms, zmax))
+
+        self.Ppolys = []
+        for i in range(Nterms):
+            Ppoly = np.polyfit(zs, Ps[:, i], deg=deg)
+            self.Ppolys.append(Ppoly)
+
+        self.Rpolys = []
+        for i in range(Nterms):
+            Rpoly = np.polyfit(zs, Rs[:, i], deg=deg)
+            self.Rpolys.append(Rpoly)
+
+    def build_poles_residues_interpolator(self,interpolation='cubic',**kwargs):
+
+        from scipy.interpolate import interp1d
+        self.Ps_interp = [interp1d(self.zs,P,kind=interpolation,**kwargs) \
+                          for P in self.Ps.T]
+        self.Rs_interp = [interp1d(self.zs,R,kind=interpolation,**kwargs) \
+                          for R in self.Rs.T]
+
+    def evaluate_poles(self, zs=None, Nmodes=None):
+
+        if zs is None: zs = self.zs
+
+        # Default to all terms...
+        if not Nmodes:
+            Nmodes = self.Nmodes
+
+        #Ps = self.Ps[:, :Nmodes].interpolate_axis(zs, axis=0, kind=interpolation,
+        #                                          bounds_error=False, extrapolate=True)
+        Ps = [interp(zs) for interp in self.Ps_interp[:Nmodes]]
+
+        return np.array(Ps).T #keep z-axis first
+
+    def evaluate_residues(self, zs=None, Nmodes=None):
+
+        if zs is None: zs = self.zs
+
+        # Default to all terms...
+        if not Nmodes:
+            Nmodes = self.Nmodes
+
+        #Rs = self.Rs[:, :Nmodes].interpolate_axis(zs, axis=0, kind=interpolation,
+        #                                          bounds_error=False, extrapolate=True)
+        Rs = [interp(zs) for interp in self.Rs_interp[:Nmodes]]
+
+        return np.array(Rs).T #keep z-axis first
+
+    def evaluate_poles_poly(self, zs=None, Nmodes=None):
+
+        if zs is None: zs = self.zs
+
+        # Default to all terms...
+        if not Nmodes:
+            Nmodes = self.Nmodes
+
+        Ps = np.array([np.polyval(Ppoly, zs) for Ppoly in self.Ppolys[:Nmodes]])
+
+        return Ps.T
+
+    def evaluate_residues_poly(self, zs=None, Nmodes=None, *args):
+
+        if zs is None: zs = self.zs
+
+        # Default to all terms...
+        if not Nmodes:
+            Nmodes = self.Nmodes
+
+        Rs = np.array([np.polyval(Rpoly, zs) for Rpoly in self.Rpolys[:Nmodes]])
+
+        return Rs.T
+
+    # evaluate_poles=evaluate_poles_poly
+    # evaluate_residues=evaluate_residues_poly
+
+    def get_demodulation_nodes(self, zmin=.01, amplitude=2, quadrature=numrec.GL,
+                               harmonic=3, Nts=None):
+        # GL quadrature is the best, can do even up to harmonic 3 with 6 points on e.g. SiO2
+        # TS requires twice as many points
+        # quadrature `None` needs replacing, this linear quadrature is terrible
+
+        # max harmonic resolvable will by 1/dt=Nts
+        if not Nts: Nts = 8 * (harmonic+1)
+        if isinstance(quadrature, str) or hasattr(quadrature, 'calc_nodes'):
+            ts, wts = numrec.GetQuadrature(N=Nts, xmin=-.5, xmax=0, quadrature=quadrature)
+
+        else:
+            ts = np.linspace(-1 + 1 / np.float(Nts),
+                                0 - 1 / np.float(Nts), Nts) * .5
+            wts = np.ones((Nts,)) / np.float(Nts) * .5
+
+        # This is what's necessary for fourier element
+        # cos harmonic kernel, *2 for full period integration, *2 for coefficient
+        wts *= 4 * np.cos(2 * np.pi * harmonic * ts)
+        zs = zmin + amplitude * (1 + np.cos(2 * np.pi * ts))
+
+        return list(zip(zs, wts))
+
+    def get_Erad_from_nodes(self, beta, nodes, Nmodes=None):
+
+        if not hasattr(beta, '__len__'): beta=[beta]
+        if not isinstance(beta,np.ndarray): beta=np.array(beta)
+        assert beta.ndim == 1
+
+        # `Frequency` axis will be first
+        if isinstance(beta, np.ndarray): beta = beta.reshape((len(beta), 1, 1))
+
+        # Weights apply across z-values
+        zs, ws = list(zip(*nodes))
+        ws_grid = np.array(ws).reshape((1, len(ws), 1))
+        zs = np.array(zs)
+
+        # Evaluate at all nodal points
+        Rs = self.evaluate_residues(zs, Nmodes)
+        Ps = self.evaluate_poles(zs, Nmodes)
+
+        # Should broadcast over freqs if beta has an additional first axis
+        # The offset term is absolutely critical, offsets false z-dependence arising from first terms
+        signals = np.sum(Rs * (1 / (beta - Ps) + 1 / Ps) * ws_grid, axis=-1)  # +Rs/Ps,axis=-1)
+
+        signals = signals.squeeze()
+        if isinstance(beta,AWA):
+            axes=[beta.axes[0],zs]
+            axis_names = [beta.axis_names[0], 'z/a']
+            signals = AWA(signals,axes=axes,axis_names=axis_names)
+
+        if not signals.ndim: signals = signals.tolist()
+
+        return signals
+
+    def get_Erad(self, beta, zs=None, Nmodes=None):
+
+        if zs is None: zs=self.zs
+
+        nodes = [(z,1) for z in zs]
+
+        return self.get_Erad_from_nodes( beta, nodes, Nmodes=Nmodes)
+
+    def get_Erad_demodulated(self,beta, zmin=.01,amplitude=2,
+                             max_harmonic=5,Nts=None, Nmodes=None):
+
+        harmonics = np.arange(max_harmonic+1)
+
+        signals = []
+        for harmonic in harmonics:
+
+            nodes = self.get_demodulation_nodes( zmin=zmin, amplitude=amplitude, quadrature=numrec.GL,
+                                                harmonic=harmonic, Nts=Nts)
+            signal_at_nodes = self.get_Erad_from_nodes(beta, nodes, Nmodes=Nmodes)
+            signal = np.sum(signal_at_nodes,axis=-1) #last axis will be across nodes
+            signals.append(signal)
+
+        axes=[harmonics]
+        axis_names = ['Harmonic']
+        if isinstance(signal,AWA):
+            axes += signal.axes
+            axis_names += signal.axis_names
+
+        return AWA(signals,axes=axes,axis_names=axis_names)
+
+    def __call__(self, *args, **kwargs):
+        return self.get_Erad(*args, **kwargs)
+
+    @staticmethod
+    def demodulate(signals, zmin=.01, amplitude=2, max_harmonic=5, Nts=None,
+                   quadrature=numrec.GL):
+        """This only exists as a "check" on `get_Erad_demodulated`; they indeed provide the same answer"""
+
+        global ts, wts, weights, signals_vs_time
+
+        harmonics=np.arange(max_harmonic+1)
+
+        # max harmonic resolvable will be frequency = 1/dt = Nts
+        if not Nts: Nts = 4 * (np.max(harmonics)+1)
+        if isinstance(quadrature, str) or hasattr(quadrature, 'calc_nodes'):
+            ts, wts = numrec.GetQuadrature(N=Nts, xmin=-.5, xmax=0, quadrature=quadrature)
+
+        else:
+            ts, wts = np.linspace(-.5, 0, Nts), None
+
+        zs = amplitude * (1 + np.cos(2 * np.pi * ts)) + zmin
+
+        harmonics = np.array(harmonics).reshape((len(harmonics), 1))
+        weights = np.cos(2 * np.pi * harmonics * ts)
+        if wts is not None: weights *= wts
+        weights_grid = weights.reshape(weights.shape + (1,) * (signals.ndim - 1))
+
+        signals_vs_time = signals.interpolate_axis(zs, axis=0, bounds_error=False, extrapolate=True)
+        signals_vs_time.set_axes([ts], axis_names=['t'])
+        integrand = signals_vs_time * weights_grid
+
+        if wts is not None:
+            demodulated = 2 * 2 * np.sum(integrand, axis=1)  # perform quadrature
+        else:
+            demodulated = 2 * 2 * quadrature(integrand, x=ts, axis=1)
+
+        axes = [harmonics]
+        axis_names = ['harmonic']
+        if isinstance(signals, AWA):
+            axes += signals.axes[1:]
+            axis_names += signals.axis_names[1:]
+        demodulated = AWA(demodulated, axes=axes, axis_names=axis_names)
+
+        return demodulated
+
+    def invert_signal(self, signals, nodes, Nmodes=10,
+                      select_by='continuity',
+                      target=0,
+                      scaling=10):
+        """The inversion is not unique, consequently the selected solution
+        will probably be wrong if signal values correspond with 
+        "beta" values that are too large (`|beta|~>min{|Poles|}`).
+        This can be expected to break at around `|beta|>2`."""
+        # Default is to invert signal in contact
+        # ~10 terms seem required to converge on e.g. SiO2 spectrum,
+        # especially on the Re(beta)<0 (low signal) side of phonons
+
+        global roots, poly, root_scaling
+
+        # global betas,all_roots,pmin,rs,ps,As,Bs,roots,to_minimize
+        if self.verbose:
+            Logger.write('Inverting `signals` based on the provided `nodes` to obtain consistent beta values...')
+
+        if not hasattr(signals, '__len__'): signals = [signals]
+        if not isinstance(signals, AWA): signals = AWA(signals)
+
+        zs, ws = list(zip(*nodes))
+        ws_grid = np.array(ws).reshape((len(ws), 1))  # last dimension is to broadcast over all `Nterms` equally
+        zs = np.array(zs)
+
+        Rs = self.evaluate_residues(zs,Nmodes)
+        Ps = self.evaluate_poles(zs,Nmodes)
+
+        # `rs` and `ps` can safely remain as arrays for `invres`
+        rs = (Rs * ws_grid).flatten()
+        ps = Ps.flatten()
+
+        k0 = np.sum(rs / ps).tolist()
+
+        # Rescale units so their order of magnitude centers around 1
+        rscaling = np.exp(-(np.log(np.abs(rs).max()) +
+                               np.log(np.abs(rs).min())) / 2.)
+        pscaling = np.exp(-(np.log(np.abs(ps).max()) +
+                               np.log(np.abs(ps).min())) / 2.)
+        root_scaling = 1 / pscaling
+        # rscaling=1
+        # pscaling=1
+        if self.verbose:
+            Logger.write('\tScaling residues by a factor %1.2e to reduce floating point overflow...' % rscaling)
+            Logger.write('\tScaling poles by a factor %1.2e to reduce floating point overflow...' % pscaling)
+        rs *= rscaling
+        ps *= pscaling
+        k0 *= rscaling / pscaling
+        signals = signals * rscaling / pscaling
+
+        # highest order first in `Ps` and `Qs`
+        # VERY SLOW - about 100ms on practical inversions (~60 terms)
+        As, Bs = invres(rs, ps, k=[k0], tol=1e-16,
+                        rtype='avg')  # tol=1e-16 is the smallest allowable to `unique_roots`..
+
+        dtype = np.complex128  # Double precision offers noticeable protection against overflow
+        As = np.array(As, dtype=dtype)
+        Bs = np.array(Bs, dtype=dtype)
+        signals = signals.astype(dtype)
+
+        # import time
+
+        betas = []
+        self.closest_roots=[]
+        for i, signal in enumerate(signals):
+            # t1=time.time()
+
+            # Root finding `roots` seems to give noisy results when `Bs` has degree >84, with dynamic range ~1e+/-30 in coefficients...
+            # Pretty fast - 5-9 ms on practical inversions with rank ~60 companion matrices, <1 ms with ~36 terms
+            # @TODO: Root finding chokes on `Nterms=9` (number of eigenfields) and `Nts=12` (number of nodes),
+            #       necessary for truly converged S3 on resonant phonons, probably due to
+            #       floating point overflow - leading term increases exponentially with
+            #       number of terms, leading to huge dynamic range.
+            #       Perhaps limited by the double precision of DGEEV.
+            #       So, replace with faster / more reliable root finder?
+            #       We need 1) speed, 2) ALL roots (or at least the first ~10 smallest)
+            poly = As - signal * Bs
+            roots = find_roots(poly, scaling=scaling)
+            #roots = np.roots(poly)
+            where_valid = roots.imag > 0
+            if not where_valid.any():
+                raise ValueError('No physical roots found, the model is invalid!  Please change input parameters.')
+            roots = roots[where_valid]
+            roots *= root_scaling  # since all beta units scaled by `pscaling`, undo that here
+
+            # print time.time()-t1
+
+            # How should we select the most likely beta among the multiple solutions?
+            # 1. Avoids large changes in value of beta
+            if select_by == 'difference' and i >= 1:
+                if i == 1 and self.verbose:
+                    Logger.write('\tSelecting remaining roots by minimizing differences with prior...')
+                to_minimize = np.abs(roots - betas[i - 1])
+
+            # 2. Avoids large changes in slope of beta (best for spectroscopy)
+            # Nearly guarantees good beta spectrum, with exception of very loosely sampled SiC spectrum
+            # Loosely samples SiO2-magnitude phonons still perfectly fine
+            elif select_by == 'continuity' and i >= 2:
+                if i == 2 and self.verbose:
+                    Logger.write('\tSelecting remaining roots by ensuring continuity with prior...')
+                earlier_diff = betas[i - 1] - betas[i - 2]
+                current_diffs = roots - betas[i - 1]
+                to_minimize = np.abs(current_diffs - earlier_diff)
+
+            # 3. Select specifically which pole we want |beta| to be closest to
+            elif select_by=='target':
+                if hasattr(target, '__len__'): target = target[i]
+                else: target = target
+
+                if self.verbose and i==0:
+                    Logger.write('\tSeeding inversion closest to pole %s...' % target)
+                to_minimize = np.abs(target - roots)
+
+            else:
+                raise ValueError('`select_by=%s` not recognized!  Choose "difference", "continuity", or "target".'%select_by)
+
+            self.closest_roots.append( roots[np.argsort(to_minimize)][:5] )
+
+            beta = roots[to_minimize == to_minimize.min()].squeeze()
+            betas.append(beta)
+            if not i % 5 and self.verbose:
+                Logger.write('\tProgress: %1.2f%%  -  Inverted %i signals of %i.' % \
+                             (((i + 1) / np.float(len(signals)) * 100),
+                              (i + 1), len(signals)))
+
+        betas = AWA(betas)
+        betas.adopt_axes(signals)
+        betas = betas.squeeze()
+        if not betas.ndim: betas = betas.tolist()
+
+        return betas
 

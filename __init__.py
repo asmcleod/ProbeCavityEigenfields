@@ -336,6 +336,8 @@ class Probe(object):
 
         self.set_freq(freq)
         self.set_gap(gap)
+
+        self.all_rp_vals=[]
         
     def get_a(self): return self._a
     
@@ -358,18 +360,42 @@ class Probe(object):
         self._eigenrhos=None
         self._eigencharges=None
         self._eigenexcitations=None
+
+    def plot_geometry(self,**kwargs):
+
+        zsprobe = self.get_zs()
+        rsprobe = self.get_radii()
+
+        # -- Plot probe shape
+
+        plt.figure()
+        # plt.plot(-radii,zs,radii,zs,color='b')
+        xsprobe = np.append(-rsprobe[::-1], rsprobe)
+        ysprobe = np.append(zsprobe[::-1], zsprobe)
+        plt.fill_between(x=xsprobe,
+                         y1=ysprobe, y2=ysprobe.max(),
+                         color='gray', edgecolor='k', lw=2)
+        plt.plot(xsprobe, ysprobe, marker='o', ls='', color='k',**kwargs)
+        plt.gca().set_aspect('equal')
+
+        plt.xlabel('Radial coordinate')
+        plt.ylabel('Z')
         
     def get_freq(self): return copy.copy(self._freq)
     
     def get_k(self): return 2*np.pi*self.get_freq()
     
-    def get_kappa_min(self,k):
+    def get_kappa_min(self):
 
         kappa_L = 1/np.max(self.get_zs()) * self._kappa_min_factor
-        kappa_k = k * self._kappa_min_factor
+
+        return kappa_L
+        # Disable k-dependence for now, it creates problems when comparing absolute scales of integrated results at different frequencies
+        # especially for rp values that are large for small values of kappa (near the light cone)
+        #kappa_k = 0 #k * self._kappa_min_factor
 
         # return whichever of the two is larger (not to undersample the probe length!)
-        return np.max( (kappa_L, kappa_k) )
+        #return np.max( (kappa_L, kappa_k) )
     
     def get_gap(self): return copy.copy(self._gap)
         
@@ -427,7 +453,7 @@ class Probe(object):
         Dts=self.D.node_dts[np.newaxis,:]
 
         #--- Prepare Quadrature Grid
-        if kappa_min is None: kappa_min=self.get_kappa_min(k)
+        if kappa_min is None: kappa_min=self.get_kappa_min()
         Logger.write('\tIncluding evanescent (near-field) waves..')
         self.kappas,self.dkappas=numrec.GetQuadrature(xmin=kappa_min,
                                             xmax=kappa_max,\
@@ -437,7 +463,7 @@ class Probe(object):
             Logger.write('\tIncluding propogating (far-field) waves..')
             qs,dqs=numrec.GetQuadrature(xmin=0,xmax=k,\
                                             N=Nkappas,\
-                                            quadrature=numrec.GL)
+                                            quadrature=qquadrature)
             kzs=np.sqrt(k**2-qs**2)
             self.kappasFF=-1j*kzs
             self.dkappasFF=1j*qs/kzs*dqs
@@ -460,7 +486,9 @@ class Probe(object):
         #PCoul = (2 * np.pi * 1j / k) * np.matrix(
         #    -(Sin * Kappas + Cos * Qs) * Exp * Dts)  # post-factor would be `J0(q*rho)`
 
-        if k==0: PAz = PAr = np.zeros(PCoul.shape)
+        #--- Faraday propagator - include only if we want to invoke propagation of far-fields
+        if k==0 or not farfield:
+            PAz = PAr = np.zeros(PCoul.shape)
         else:
             #--- Az propagator
             PAz = 1j*k * np.matrix( +Cos*J0 * Exp * Dts) #post-factor would be `J0(q*rho)`
@@ -470,8 +498,8 @@ class Probe(object):
 
         self._fourpotentialpropagators = dict(Phi=PCoul,
                                                 Az=PAz,
-                                                Ar=PAr,\
-                                                kappas=self.kappas,\
+                                                Ar=PAr,
+                                                kappas=self.kappas,
                                                 dkappas=self.dkappas)
 
 
@@ -479,7 +507,8 @@ class Probe(object):
         # mirror signatures (Phi,Ar,Az) -> (-,-,+)
         return self._fourpotentialpropagators
 
-    def getRp(self,freq,qs,recompute=True,rp=None,remove_nan=True,**kwargs):
+    def getRp(self,freq,qs,recompute=True,rp=None,\
+              remove_nan=True,**kwargs):
         """Compute rp at `freq,qs` from a provided or stored `rp` function or AWA."""
 
         if not recompute:
@@ -505,6 +534,7 @@ class Probe(object):
         self.rpfreq = freq
         self.rpqs = qs
         self.rpvals=AWA(rpvals,axes=[qs],axis_names=['q'])
+        self.all_rp_vals.append(self.rpvals)
 
         return rpvals
 
@@ -874,6 +904,7 @@ class Probe(object):
     
     def get_eigenbrightness(self, k=None, angles=np.linspace(45, 90, 20), \
                             illumination=EBesselBeamFF, average=True, \
+                            Nmodes=20,
                             recompute=False):
         """This is the same as `get_eigenexcitations` except brightness is averaged over illumination angles."""
 
@@ -889,7 +920,7 @@ class Probe(object):
             
             Er,Ez=illumination(angle=angle,k=k)
             Rn=[self.get_field_overlap(Q,Er=Er,Ez=Ez) \
-                 for Q in np.array(self.get_eigencharges())]
+                 for Q in np.array(self.get_eigencharges())[:Nmodes]]
             Rns.append(Rn)
             
         Rns=AWA(Rns,axes=[angles,None],\
@@ -1037,8 +1068,8 @@ class Probe(object):
     def EradVsGap(self, freq, zmin=.1, zmax=4, \
                   Nzs=20, zquadrature=numrec.CC, \
                   Nmodes=20, illum_angles=np.linspace(10,80,20), \
-                  rp=None, \
-                  recompute_rp=True, \
+                  farfield=False,
+                  rp=None, recompute_rp=True, \
                   recompute_propagators=True, \
                   recompute_brightness=True, \
                   subtract_background=True, \
@@ -1071,6 +1102,7 @@ class Probe(object):
             self.RSampMat=self.getRsampleMatrix(freq,gap,Nmodes=Nmodes,\
                                            recompute_rp=recompute_rp,\
                                            recompute_propagators=recompute_propagators,\
+                                            farfield=farfield,
                                            rp=rp,**kwargs)
             self.ScatMat = (self.RSampMat-RhoMat).getI()
             if subtract_background: self.ScatMat += RhoMat.getI()
@@ -1093,15 +1125,19 @@ class Probe(object):
         
         return result
     
-    def EradSpectrumDemodulated(self,freqs,zmin=.1,amplitude=2,\
-                        Nzs=16,zquadrature=numrec.CC,\
-                        Nmodes=20,illum_angles=np.linspace(10,80,20),\
-                        rp=None,demod_order=4,\
+    def EradSpectrumDemodulated(self,freqs,zmin=.1,amplitude=2,
+                            Nzs=16,zquadrature=numrec.CC,
+                            Nmodes=20,illum_angles=np.linspace(10,80,20),
+                            rp=None,demod_order=4,
+                            farfield=False,
                             update_propagators=True,
                             update_brightness=False,
                             probe_spectroscopy=None,
                             update_charges=True,
                             **kwargs):
+
+        self.all_rp_vals=[]
+
         T=Timer()
         zmax = zmin+2*amplitude
         
@@ -1119,6 +1155,7 @@ class Probe(object):
                                  Nzs=Nzs, zquadrature=zquadrature,
                                  Nmodes=Nmodes, illum_angles=illum_angles,
                                  rp=rp, recompute_rp=True,
+                                 farfield=farfield,
                                  recompute_propagators=recompute_propagators,
                                  recompute_brightness=recompute_brightness,
                                  **kwargs)
@@ -1130,9 +1167,9 @@ class Probe(object):
             if not update_brightness: recompute_brightness=False
         
         gaps=EradsVsFreq[0].axes[0]
-        EradsVsFreq=AWA(EradsVsFreq,axes=[freqs,gaps],\
+        EradsVsFreq=AWA(EradsVsFreq,axes=[freqs,gaps],
                         axis_names=['Frequency',r'$z_\mathrm{tip}$']).T
-        eigenamplitudesVsFreq=AWA(eigenamplitudesVsFreq,axes=[freqs,gaps,None],\
+        eigenamplitudesVsFreq=AWA(eigenamplitudesVsFreq,axes=[freqs,gaps,None],
                                   axis_names=['Frequency',r'$z_\mathrm{tip}$','eigenindex']).T
         result=dict(Erad=EradsVsFreq,eigenamplitude=eigenamplitudesVsFreq)
         
