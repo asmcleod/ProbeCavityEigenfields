@@ -642,7 +642,7 @@ class Probe(object):
         #If ZM is a definite matrix, this inner product should be nonzero only for `ec2=ec1`
         N2=np.array(Q1.T @ -ZM @ Q2).squeeze()
         
-        return np.complex(N2)
+        return complex(N2)
     
     def get_field_overlap(self, Q, Er=None, Ez=None, V=None):
 
@@ -654,7 +654,7 @@ class Probe(object):
         overlap = Q.T @ V #V carries the annular weights
         
         #try to collapse to single number
-        try: return np.complex(overlap)
+        try: return complex(overlap)
         except TypeError: return np.array(overlap).squeeze() #squeeze down vectors
     
     def get_charge_density(self,Q):
@@ -897,8 +897,10 @@ class Probe(object):
                   axis_names=['Angle (deg.)'])
 
         if average:
-            if Rns.ndim==2: angles=angles[:,np.newaxis] #just so we broadcast over a "hidden" axis
-            Rns = np.mean(np.sin(np.deg2rad(angles)) * Rns, axis=0)
+            # 2023.05.21 - Sin factor was removed, because focusing optics should equally collimate entire collection range
+            #if Rns.ndim==2: angles=angles[:,np.newaxis] #just so we broadcast over a "hidden" axis
+            #Rns = np.mean(np.sin(np.deg2rad(angles)) * Rns, axis=0)
+            Rns = np.mean(Rns, axis=0)
 
         return Rns
     
@@ -913,6 +915,7 @@ class Probe(object):
         if not recompute:
             try: return self._eigenbrightness
             except AttributeError: pass
+        print('Computing eigenbrightness...')
         
         Rns=[]
         if not hasattr(angles,'__len__'): angles=[angles]
@@ -927,7 +930,9 @@ class Probe(object):
                 axis_names=['Angle (deg.)','eigenindex'])
         
         if average:
-            Rns=np.mean(np.sin(np.deg2rad(angles[:,np.newaxis])) * Rns, axis=0)
+            # 2023.05.21 - Sin factor was removed, because focusing optics should equally collimate entire collection range
+            #Rns=np.mean(np.sin(np.deg2rad(angles[:,np.newaxis])) * Rns, axis=0)
+            Rns=np.mean(Rns, axis=0)
             
         self._eigenbrightness=Rns
         
@@ -1085,7 +1090,10 @@ class Probe(object):
         # Recompute only if instructed
         Vn=self.get_eigenbrightness(k=2*np.pi*freq,angles=illum_angles,average=True,\
                                      illumination=illumination,\
-                                     recompute=recompute_brightness)[:Nmodes]
+                                     recompute=recompute_brightness)
+        #If we have an angle axis, average it (axis=0)
+        if Vn.ndim==2: Vn = np.mean(Vn,axis=0)
+        Vn = Vn[:Nmodes]
         Vn=np.matrix(Vn).T
             
         gaps,dgaps=numrec.GetQuadrature(xmin=zmin,
@@ -1108,7 +1116,7 @@ class Probe(object):
             if subtract_background: self.ScatMat += RhoMat.getI()
             ScatMats.append(self.ScatMat)
             # Store the radiated field, as well as the population of eigenmodes
-            Erad = np.complex(Vn.T @ (self.ScatMat) @ Vn)
+            Erad = complex(Vn.T @ (self.ScatMat) @ Vn)
             Erads.append(Erad)
             eigenamplitudes.append(np.array( (self.ScatMat) @ Vn).squeeze())
             
@@ -1125,25 +1133,24 @@ class Probe(object):
         
         return result
     
-    def EradSpectrumDemodulated(self,freqs,zmin=.1,amplitude=2,
-                            Nzs=16,zquadrature=numrec.CC,
-                            Nmodes=20,illum_angles=np.linspace(10,80,20),
-                            rp=None,demod_order=4,
-                            farfield=False,
-                            update_propagators=True,
-                            update_brightness=False,
-                            probe_spectroscopy=None,
-                            update_charges=True,
-                            **kwargs):
+    def EradSpectrumDemodulated(self, freqs, gapmin=.1, amplitude=2,
+                                Ngaps=16, zquadrature=numrec.CC,
+                                Nmodes=20, illum_angles=np.linspace(10,80,20),
+                                rp=None, demod_order=4,
+                                farfield=False,
+                                update_propagators=True,
+                                update_brightness=False,
+                                probe_spectroscopy=None,
+                                update_charges=True,
+                                **kwargs):
 
         self.all_rp_vals=[]
 
         T=Timer()
-        zmax = zmin+2*amplitude
+        gapmax = gapmin + 2 * amplitude
         
         #--- First pass will compute propagators and eigenexcitations
         recompute_propagators=True
-        recompute_brightness=True
         
         EradsVsFreq=[]
         eigenamplitudesVsFreq=[]
@@ -1151,20 +1158,20 @@ class Probe(object):
         for freq in freqs:
             if probe_spectroscopy is not None:
                 probe_spectroscopy.set_eigenset(self,freq,update_charges=update_charges)
-            dErad=self.EradVsGap(freq, zmin=zmin, zmax=zmax,
-                                 Nzs=Nzs, zquadrature=zquadrature,
+            dErad=self.EradVsGap(freq, zmin=gapmin, zmax=gapmax,
+                                 Nzs=Ngaps, zquadrature=zquadrature,
                                  Nmodes=Nmodes, illum_angles=illum_angles,
                                  rp=rp, recompute_rp=True,
                                  farfield=farfield,
                                  recompute_propagators=recompute_propagators,
-                                 recompute_brightness=recompute_brightness,
+                                 recompute_brightness=update_brightness,
                                  **kwargs)
             EradsVsFreq.append(dErad['Erad'])
             eigenamplitudesVsFreq.append(dErad['eigenamplitude'])
             
             # These don't necessarily have to update throughout the calculation, they are approximately fixed
             if not update_propagators: recompute_propagators=False
-            if not update_brightness: recompute_brightness=False
+            #if not update_brightness: recompute_brightness=False
         
         gaps=EradsVsFreq[0].axes[0]
         EradsVsFreq=AWA(EradsVsFreq,axes=[freqs,gaps],
@@ -1182,6 +1189,44 @@ class Probe(object):
         Logger.write('\t'+T())
         
         return result
+
+    def getNormalizedSignal(self,freqs_wn,rp,
+                            a_nm=30,amplitude_nm=50,demod_order=5,
+                            Ngaps=24*4,gapmin=.15,
+                            rp_norm = None,
+                            freqs_wn_norm = None,
+                            **kwargs):
+
+        # Wrap the provided rp functions so they can expand out dimensionless frequencies and wavevectors
+        # The supplied reflection function should take `frequency (wavenumbers), q (wavenumbers)`
+        if rp_norm is None:
+            from NearFieldOptics import Materials as M
+            rp_norm = M.Au.reflection_p
+        def rp_norm_wrapped(freq,q): return rp_norm( freq / (a_nm * 1e-7),
+                                                     q / (a_nm * 1e-7))
+        def rp_wrapped(freq,q): return rp( freq / (a_nm * 1e-7),
+                                            q / (a_nm * 1e-7))
+
+        amplitude = amplitude_nm / a_nm
+        freqs = freqs_wn * (a_nm * 1e-7)
+        if freqs_wn_norm is None: freqs_wn_norm = np.mean(freqs_wn)
+        freqs_norm = freqs_wn_norm * (a_nm * 1e-7)
+
+        signals_ref = self.EradSpectrumDemodulated(freqs=freqs_norm, rp=rp_norm_wrapped,
+                                                   gapmin=gapmin, amplitude=amplitude,
+                                                   Ngaps=Ngaps, demod_order=demod_order,
+                                                   **kwargs)
+        signals = self.EradSpectrumDemodulated(freqs, rp=rp_wrapped,
+                                               gapmin=gapmin, amplitude=amplitude,
+                                               Ngaps=Ngaps, demod_order=demod_order,
+                                               **kwargs)
+        signals['Sn'] /= signals_ref['Sn']
+        signals['Sn'].set_axes([None,freqs_wn],
+                               axis_names=[None,'Frequency (cm$^{-1}$)'])
+        signals['Erad'].set_axes([None,freqs_wn],
+                                 axis_names=[None,'Frequency (cm$^{-1}$)'])
+
+        return signals
     
     def EradApproachCurveDemodulated(self,freq,zs=np.logspace(-1,1,50),amplitude=2,\
                                     Nzs_demod=12,zquadrature=numrec.CC,\
@@ -1305,6 +1350,7 @@ class Probe(object):
 
     def computeEfieldImages(self, Q, rs_out, zs_out, rho=1,\
                             rp=None, freq=None, Nqs_factor=4,display=True,mirror_double_images=True):
+        """ Real-space map of electric field in quasistatic limit."""
 
         if mirror_double_images: rs_out=rs_out[rs_out>0]
 

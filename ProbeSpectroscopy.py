@@ -115,7 +115,7 @@ class ProbeSpectroscopy(object):
         overlap = Qn.T @ Oavg @ Qm
 
         # -- This is the standard fall-back for distance measure
-        distance = 1 / np.abs(np.complex(overlap))
+        distance = 1 / np.abs(complex(overlap))
 
         # -- This one's a no-brainer, and workable
         # distance=np.min( (np.sum(np.abs(v1-v2)),\
@@ -143,7 +143,13 @@ class ProbeSpectroscopy(object):
         # --- Assign labels to modes
         connectivity = []
         for coordind in range(len(coords)):
-            print('Measuring distances at coordinate index %i of %i...'%(coordind,len(coords)))
+
+            import sys
+            progress=coordind / len(coords)*100
+            sys.stdout.write('\r')
+            # the exact output you're looking for:
+            sys.stdout.write('\tProgress: %1.2f%%'%progress)
+            sys.stdout.flush()
 
             coord = coords[coordind]
             N = np.min((Nmodes, len(self._recorded_eigenrhos[coord])))
@@ -157,7 +163,6 @@ class ProbeSpectroscopy(object):
 
                 connections = []
                 for n in range(N):
-                    print('Measuring distances to eigenset %i of %i...'%(n,N))
                     ds = [self.distance(coord_prev, coord, m, n,
                                         **kwargs) for m in range(M)]
                     m = np.argmin(ds)
@@ -302,7 +307,7 @@ class ProbeSpectroscopy(object):
     def get_brightnesses_AWA(self,Nmodes=None,recompute=False,
                              recompute_eigencharges=False,
                              eigencharges_AWA=None,
-                             angles=np.linspace(10,80,20),
+                             angles=np.linspace(0,90,20),
                              verbose=True,**kwargs):
 
         try:
@@ -416,7 +421,7 @@ def compute_eigenset_at_freq(P, freq, PhiM=False, **kwargs):
             #                               sommerfeld=True,rp=None,Nkappas=244*4);
             # Zmirror = P.get_mirror_impedance(k=P.get_k(),nonsingular=False,recompute=True,display=False)
             Zmirror = P.get_mirror_impedance(k=P.get_k(), farfield=False, \
-                                             recompute=True, sommerfeld=True, Nkappas=244 * 8)
+                                             recompute=True, sommerfeld=True, **kwargs)
 
         rhos, Qs = P.solve_eigenmodes(condition_ZM=True, condition_ZS=False, ZMthresh=0, recompute_impedance=False)
         print('Finished freq=%1.2g, elapsed time: %1.2g s' % (freq, time.time() - t0))
@@ -608,6 +613,7 @@ class EncodedEigenfields(object):
             PsiMats.append(PsiMat)
 
         #--- Package results
+        brightnesskwargs['average']=True
         Brightnesses = Spec.get_brightnesses_AWA(Nmodes=Nmodes, recompute=False,
                                                  eigencharges_AWA = eigencharges_vs_gap,
                                                  **brightnesskwargs)[:Nmodes].T #Put coordinate (gaps) axis first

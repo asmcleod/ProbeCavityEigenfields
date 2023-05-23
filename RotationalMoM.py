@@ -146,62 +146,86 @@ def Spectral_Ar_Nonsing_integral(R, wz, k):
 #-- Coulomb, singular
 
 @njit
-def Spatial_Coul_Sing_integrand_regularized(phi, X2, Y2, k):
+def Coul_Sing_integrand_regularized(phi, X2, Y2, k):
     dz = 0
     Del = np.sqrt(X2 + dz ** 2 - Y2 * np.cos(phi))
 
     return (np.cos(k * Del) - 1) / Del
 
-def Spatial_Coul_SingDiag_integral(R, drdz, wz, k):
+def Coul_SingDiag_integral(R, drdz, wz, k):
 
     X2 = Y2 = 2 * R ** 2
-    angint = quad(Spatial_Coul_Sing_integrand_regularized, 0, np.pi, args=(X2, Y2, k),
+    angint = quad(Coul_Sing_integrand_regularized, 0, np.pi, args=(X2, Y2, k),
                   epsabs=1.49e-08,
                   epsrel=1.49e-08, limit=quadlimit)
 
     # Second and third rows are the correction proportional to `(w*drdz)**2`
-    logpart = 2/R * (1 + np.log(16 * R / wz)) \
-                + wz**2 * drdz**2 / (36 * R**3) \
-                    * (2 * (1 + 3 * np.log(16 * R / wz)) -9 )
+    #logpart = 2/R * (1 + np.log(16 * R / wz)) \
+    #            + wz**2 * drdz**2 / (36 * R**3) \
+    #                * (2 * (1 + 3 * np.log(16 * R / wz)) -9 )
+
+    logpart = 2 / R * (1 + np.log(16 * R / wz))
+    # A correction term at second order in `wz`
+    logpart += wz**2 * (2 - 3 * np.log(16 * R / wz)) / (288 * R**3)
+    # A correction term at second order in `wz*dRdz`
+    logpart += -(wz*drdz)**2 * (4 + 3 * np.log(16 * R / wz)) / (36 * R**3)
 
     return angint[0] / np.pi + logpart / (2 * np.pi)
 
 @njit
-def Spatial_Coul_Sing_integrandDbl_regularized(dz, phi, R, drdz, k):
+def Coul_Sing_integrandDbl_regularized(dz, phi, R, drdz, k, alpha):
+    #Last argument will not be used, just to uniformize call signature
 
     Rz = R + drdz * dz
     Del = np.sqrt(dz ** 2 + 2*Rz**2 * (1-np.cos(phi)))
 
     return (np.cos(k * Del) - 1) / Del
 
-def Spatial_Coul_SingDiag_integralDbl(R, drdz, wz, k):
+@njit
+def Coul_Sing_integrandDbl_regularized_alpha(dz, phi, R, drdz, k, alpha):
 
-    angint = dblquad(Spatial_Coul_Sing_integrandDbl_regularized, \
-                     0, np.pi, lambda phi: -wz / 2, lambda phi: +wz / 2, args=(R, drdz, k),
+    Rz = R + drdz * dz
+    Del = np.sqrt(dz ** 2 + 2*Rz**2 * (1-np.cos(phi)))
+
+    return (np.cos(k * Del) * np.cos(alpha * phi) - 1) / Del
+
+def Coul_SingDiag_integralDbl(R, drdz, wz, k, alpha=0):
+
+    if not alpha: integrand = Coul_Sing_integrandDbl_regularized
+    else: integrand = Coul_Sing_integrandDbl_regularized_alpha
+
+    angint = dblquad(integrand, \
+                     0, np.pi, lambda phi: -wz / 2, lambda phi: +wz / 2, args=(R, drdz, k, alpha),
                       epsabs=1.49e-08,
                       epsrel=1.49e-08, limit=quadlimit)
 
     # Second and third rows are the correction proportional to `(w*drdz)**2`
-    logpart = 2 / R * (1 + np.log(16 * R / wz)) \
-                + wz ** 2 * drdz ** 2 / (36 * R ** 3) \
-                   * (2 * (1 + 3 * np.log(16 * R / wz)) - 9)
+    #logpart = 2/R * (1 + np.log(16 * R / wz)) \
+    #            + wz**2 * drdz**2 / (36 * R**3) \
+    #                * (2 * (1 + 3 * np.log(16 * R / wz)) -9 )
+
+    logpart = 2 / R * (1 + np.log(16 * R / wz))
+    # A correction term at second order in `wz`
+    logpart += wz**2 * (2 - 3 * np.log(16 * R / wz)) / (288 * R**3)
+    # A correction term at second order in `wz*dRdz`
+    logpart += -(wz*drdz)**2 * (4 + 3 * np.log(16 * R / wz)) / (36 * R**3)
 
     return 1 / wz * angint[0] / np.pi + logpart / (2 * np.pi)
 
 #TODO: diagonal-adjacent integrals
 
 @njit
-def Spatial_Coul_SingOffdiag_integrand(phi, X2,Y2,k):
+def Coul_SingOffdiag_integrand(phi, X2,Y2,k):
 
     Del = np.sqrt(X2 - Y2 * np.cos(phi))
 
     return np.cos(k*Del) / Del
 
-def Spatial_Coul_SingOffdiag_integral(R1, R2, dz, k):
+def Coul_SingOffdiag_integral(R1, R2, dz, k):
 
     X2 = R1**2 + R2**2 + dz**2
     Y2 = 2*R1*R2
-    cr = quad(Spatial_Coul_SingOffdiag_integrand, 0, np.pi, args=(X2, Y2, k),
+    cr = quad(Coul_SingOffdiag_integrand, 0, np.pi, args=(X2, Y2, k),
               epsabs=1.49e-08,
               epsrel=1.49e-08, limit=quadlimit)
     return 2 * cr[0] / (2 * np.pi)  # factor of 2 emulates 0 to 2*pi, divisor enforces average
@@ -209,7 +233,7 @@ def Spatial_Coul_SingOffdiag_integral(R1, R2, dz, k):
 #NEW: a trapezoidal version of - spatial coul singular off-diag
 
 @njit
-def Spatial_Coul_SingOffdiag_integrandMulti(phi,k,*X2Y2s):
+def Coul_SingOffdiag_integrandMulti(phi,k,*X2Y2s):
 
     result=0
     for X2,Y2 in X2Y2s:
@@ -219,7 +243,7 @@ def Spatial_Coul_SingOffdiag_integrandMulti(phi,k,*X2Y2s):
 
     return result/len(X2Y2s)
 
-def Spatial_Coul_SingOffdiag_integralMulti(r1, r2, dz,\
+def Coul_SingOffdiag_integralMulti(r1, r2, dz,\
                                            drdz1,drdz2,\
                                           wz1,wz2, k):
 
@@ -238,7 +262,7 @@ def Spatial_Coul_SingOffdiag_integralMulti(r1, r2, dz,\
         Y2 = 2 * r1 * R2
         X2Y2s.append((X2,Y2))
 
-    cr = quad(Spatial_Coul_SingOffdiag_integrandMulti, 0, np.pi, args=(k,)+tuple(X2Y2s),
+    cr = quad(Coul_SingOffdiag_integrandMulti, 0, np.pi, args=(k,)+tuple(X2Y2s),
               epsabs=1.49e-08,
               epsrel=1.49e-08, limit=quadlimit)
 
@@ -248,38 +272,38 @@ def Spatial_Coul_SingOffdiag_integralMulti(r1, r2, dz,\
 #-- Coulomb, nonsingular
 
 @njit
-def Spatial_Coul_Nonsing_integrand(phi, X2, Y2, k):
+def Coul_Nonsing_integrand(phi, X2, Y2, k):
 
     Del = np.sqrt(X2 + - Y2 * np.cos(phi))
 
     return np.sin(k * Del) / Del
 
-def Spatial_Coul_Nonsing_integral(R1, R2, dz, k):
+def Coul_Nonsing_integral(R1, R2, dz, k):
 
     X2 = R1 ** 2 + R2 ** 2 + dz ** 2
     Y2 = 2 * R1 * R2
 
-    angint = quad(Spatial_Coul_Nonsing_integrand, 0, np.pi, args=(X2, Y2, k),
+    angint = quad(Coul_Nonsing_integrand, 0, np.pi, args=(X2, Y2, k),
                   epsabs=1.49e-08,
                   epsrel=1.49e-08, limit=quadlimit)
 
     return angint[0] / np.pi * 1j
 
-def Spatial_Coul_Nonsing_integralDiag(R, drdz, wz, k):
+def Coul_Nonsing_integralDiag(R, drdz, wz, k):
 
-    return Spatial_Coul_Nonsing_integral(R1=R, R2=R, dz=0, k=k)
+    return Coul_Nonsing_integral(R1=R, R2=R, dz=0, k=k)
 
 @njit
-def Spatial_Coul_NonsingDiag_integrandDbl(dz, phi, R, drdz, k):
+def Coul_NonsingDiag_integrandDbl(dz, phi, R, drdz, k):
 
     Rz = R + drdz * dz
     Del = np.sqrt(dz ** 2 + 2*Rz**2 * (1-np.cos(phi)))
 
     return np.sin(k * Del) / Del
 
-def Spatial_Coul_NonsingDiag_integralDbl(R, drdz, wz, k):
+def Coul_NonsingDiag_integralDbl(R, drdz, wz, k):
 
-    angint = dblquad(Spatial_Coul_NonsingDiag_integrandDbl, \
+    angint = dblquad(Coul_NonsingDiag_integrandDbl, \
                      0, np.pi, lambda phi: -wz / 2, lambda phi: +wz / 2, args=(R, drdz, k),
                       epsabs=1.49e-08,
                       epsrel=1.49e-08, limit=quadlimit)
@@ -287,7 +311,7 @@ def Spatial_Coul_NonsingDiag_integralDbl(R, drdz, wz, k):
     return 1 / wz * angint[0] / np.pi * 1j
 
 @njit
-def Spatial_Coul_NonsingOffdiag_integrandMulti(phi,k,*X2Y2s):
+def Coul_NonsingOffdiag_integrandMulti(phi,k,*X2Y2s):
 
     result=0
     for X2,Y2 in X2Y2s:
@@ -297,7 +321,7 @@ def Spatial_Coul_NonsingOffdiag_integrandMulti(phi,k,*X2Y2s):
 
     return result/len(X2Y2s)
 
-def Spatial_Coul_NonsingOffdiag_integralMulti(r1, r2, dz,\
+def Coul_NonsingOffdiag_integralMulti(r1, r2, dz,\
                                       drdz1,drdz2,\
                                        wz1,wz2, k):
 
@@ -316,7 +340,7 @@ def Spatial_Coul_NonsingOffdiag_integralMulti(r1, r2, dz,\
         Y2 = 2 * r1 * R2
         X2Y2s.append((X2,Y2))
 
-    ci = quad(Spatial_Coul_NonsingOffdiag_integrandMulti, 0, np.pi, args=(k,)+tuple(X2Y2s),
+    ci = quad(Coul_NonsingOffdiag_integrandMulti, 0, np.pi, args=(k,)+tuple(X2Y2s),
               epsabs=1.49e-08,
               epsrel=1.49e-08, limit=quadlimit)
 
@@ -326,15 +350,15 @@ def Spatial_Coul_NonsingOffdiag_integralMulti(r1, r2, dz,\
 #-- Faraday, singular
 
 @njit
-def Spatial_Ar_Sing_integrand_regularized(phi, X2, Y2, k):
+def Ar_Sing_integrand_regularized(phi, X2, Y2, k):
     dz = 0
     Del = np.sqrt(X2 + dz ** 2 - Y2 * np.cos(phi))
 
     return (np.cos(phi)*np.cos(k * Del) - 1) / Del
 
-def Spatial_Ar_SingDiag_integral(R, drdz, wz, k):
+def Ar_SingDiag_integral(R, drdz, wz, k):
     X2 = Y2 = 2 * R ** 2
-    angint = quad(Spatial_Ar_Sing_integrand_regularized, 0, np.pi, args=(X2, Y2, k),
+    angint = quad(Ar_Sing_integrand_regularized, 0, np.pi, args=(X2, Y2, k),
                   epsabs=1.49e-08,
                   epsrel=1.49e-08, limit=quadlimit)
 
@@ -346,16 +370,16 @@ def Spatial_Ar_SingDiag_integral(R, drdz, wz, k):
     return angint[0] / np.pi + logpart / (2 * np.pi)
 
 @njit
-def Spatial_Ar_Sing_integrandDbl_regularized(dz, phi, R, drdz, k):
+def Ar_Sing_integrandDbl_regularized(dz, phi, R, drdz, k):
 
     Rz = R + drdz * dz
     Del = np.sqrt(dz ** 2 + 2*Rz**2 * (1-np.cos(phi)))
 
     return (np.cos(phi)*np.cos(k * Del) - 1) / Del
 
-def Spatial_Ar_SingDiag_integralDbl(R, drdz, wz, k):
+def Ar_SingDiag_integralDbl(R, drdz, wz, k):
 
-    angint = dblquad(Spatial_Ar_Sing_integrandDbl_regularized, \
+    angint = dblquad(Ar_Sing_integrandDbl_regularized, \
                      0, np.pi, -wz / 2, +wz / 2, args=(R, drdz, k),
                       epsabs=1.49e-08,
                       epsrel=1.49e-08, limit=quadlimit)
@@ -370,23 +394,23 @@ def Spatial_Ar_SingDiag_integralDbl(R, drdz, wz, k):
 #TODO: diagonal-adjacent integrals
 
 @njit
-def Spatial_Ar_SingOffdiag_integrand(phi, X2,Y2,k):
+def Ar_SingOffdiag_integrand(phi, X2,Y2,k):
 
     Del = np.sqrt(X2 - Y2 * np.cos(phi))
 
     return np.cos(phi)*np.cos(k*Del) / Del
 
-def Spatial_Ar_SingOffdiag_integral(R1, R2, dz, k):
+def Ar_SingOffdiag_integral(R1, R2, dz, k):
 
     X2 = R1**2 + R2**2 + dz**2
     Y2 = 2*R1*R2
-    ar = quad(Spatial_Ar_SingOffdiag_integrand, 0, np.pi, args=(X2, Y2, k),
+    ar = quad(Ar_SingOffdiag_integrand, 0, np.pi, args=(X2, Y2, k),
               epsabs=1.49e-08,
               epsrel=1.49e-08, limit=quadlimit)
     return 2 * ar[0] / (2 * np.pi)  # factor of 2 emulates 0 to 2*pi, divisor enforces average
 
 @njit
-def Spatial_Ar_SingOffdiag_integrandMulti(phi,k,*X2Y2s):
+def Ar_SingOffdiag_integrandMulti(phi,k,*X2Y2s):
 
     result=0
     for X2,Y2 in X2Y2s:
@@ -396,7 +420,7 @@ def Spatial_Ar_SingOffdiag_integrandMulti(phi,k,*X2Y2s):
 
     return result/len(X2Y2s)
 
-def Spatial_Ar_SingOffdiag_integralMulti(r1, r2, dz,\
+def Ar_SingOffdiag_integralMulti(r1, r2, dz,\
                                            drdz1,drdz2,\
                                           wz1,wz2, k):
 
@@ -415,7 +439,7 @@ def Spatial_Ar_SingOffdiag_integralMulti(r1, r2, dz,\
         Y2 = 2 * r1 * R2
         X2Y2s.append((X2,Y2))
 
-    ar = quad(Spatial_Ar_SingOffdiag_integrandMulti, 0, np.pi, args=(k,)+tuple(X2Y2s),
+    ar = quad(Ar_SingOffdiag_integrandMulti, 0, np.pi, args=(k,)+tuple(X2Y2s),
               epsabs=1.49e-08,
               epsrel=1.49e-08, limit=quadlimit)
 
@@ -425,36 +449,36 @@ def Spatial_Ar_SingOffdiag_integralMulti(r1, r2, dz,\
 #-- Faraday, nonsingular
 
 @njit
-def Spatial_Ar_Nonsing_integrand(phi, X2,Y2,k):
+def Ar_Nonsing_integrand(phi, X2,Y2,k):
 
     Del = np.sqrt(X2 - Y2 * np.cos(phi))
 
     return np.cos(phi)*np.sin(k*Del) / Del
 
-def Spatial_Ar_Nonsing_integral(R1, R2, dz, k):
+def Ar_Nonsing_integral(R1, R2, dz, k):
 
     X2 = R1**2 + R2**2 + dz**2
     Y2 = 2*R1*R2
-    ai = quad(Spatial_Ar_Nonsing_integrand, 0, np.pi, args=(X2, Y2, k),
+    ai = quad(Ar_Nonsing_integrand, 0, np.pi, args=(X2, Y2, k),
               epsabs=1.49e-08,
               epsrel=1.49e-08, limit=quadlimit)
     return 2 * ai[0]*1j / (2 * np.pi)  # factor of 2 emulates 0 to 2*pi, divisor enforces average
 
-def Spatial_Ar_Nonsing_integralDiag(R, drdz, wz, k):
+def Ar_Nonsing_integralDiag(R, drdz, wz, k):
 
-    return Spatial_Ar_Nonsing_integral(R1=R, R2=R, dz=0, k=k)
+    return Ar_Nonsing_integral(R1=R, R2=R, dz=0, k=k)
 
 @njit
-def Spatial_Ar_NonsingDiag_integrandDbl(dz, phi, R, drdz, k):
+def Ar_NonsingDiag_integrandDbl(dz, phi, R, drdz, k):
 
     Rz = R + drdz * dz
     Del = np.sqrt(dz ** 2 + 2*Rz**2 * (1-np.cos(phi)))
 
     return np.cos(phi) * np.sin(k * Del) / Del
 
-def Spatial_Ar_NonsingDiag_integralDbl(R, drdz, wz, k):
+def Ar_NonsingDiag_integralDbl(R, drdz, wz, k):
 
-    angint = dblquad(Spatial_Ar_NonsingDiag_integrandDbl, \
+    angint = dblquad(Ar_NonsingDiag_integrandDbl, \
                      0, np.pi, lambda phi: -wz / 2, lambda phi: +wz / 2, args=(R, drdz, k),
                       epsabs=1.49e-08,
                       epsrel=1.49e-08, limit=quadlimit)
@@ -462,7 +486,7 @@ def Spatial_Ar_NonsingDiag_integralDbl(R, drdz, wz, k):
     return 1 / wz * angint[0] / np.pi * 1j
 
 @njit
-def Spatial_Ar_NonsingOffdiag_integrandMulti(phi,k,*X2Y2s):
+def Ar_NonsingOffdiag_integrandMulti(phi,k,*X2Y2s):
 
     result=0
     for X2,Y2 in X2Y2s:
@@ -472,7 +496,7 @@ def Spatial_Ar_NonsingOffdiag_integrandMulti(phi,k,*X2Y2s):
 
     return result/len(X2Y2s)
 
-def Spatial_Ar_NonsingOffdiag_integralMulti(r1, r2, dz,\
+def Ar_NonsingOffdiag_integralMulti(r1, r2, dz,\
                                            drdz1,drdz2,\
                                           wz1,wz2, k):
 
@@ -491,7 +515,7 @@ def Spatial_Ar_NonsingOffdiag_integralMulti(r1, r2, dz,\
         Y2 = 2 * r1 * R2
         X2Y2s.append((X2,Y2))
 
-    ai = quad(Spatial_Ar_NonsingOffdiag_integrandMulti, 0, np.pi, args=(k,) + tuple(X2Y2s),
+    ai = quad(Ar_NonsingOffdiag_integrandMulti, 0, np.pi, args=(k,) + tuple(X2Y2s),
               epsabs=1.49e-08,
               epsrel=1.49e-08, limit=quadlimit)
 
@@ -512,14 +536,14 @@ def get_WUpperTri_matrix(wzs):
 
 def MoM_matrix(zs,wzs,Rs,k,\
                gap=1,mirror=False,faraday=True,nonsingular=True,\
-               coul_kernels=(Spatial_Coul_SingDiag_integralDbl,\
-                             Spatial_Coul_SingOffdiag_integralMulti,\
-                                Spatial_Coul_NonsingDiag_integralDbl,\
-                                Spatial_Coul_NonsingOffdiag_integralMulti),\
-               faraday_kernels=(Spatial_Ar_SingDiag_integralDbl,\
-                                Spatial_Ar_SingOffdiag_integralMulti,\
-                                Spatial_Ar_NonsingDiag_integralDbl,\
-                                Spatial_Ar_NonsingOffdiag_integralMulti)):
+               coul_kernels=(Coul_SingDiag_integralDbl,\
+                             Coul_SingOffdiag_integralMulti,\
+                                Coul_NonsingDiag_integralDbl,\
+                                Coul_NonsingOffdiag_integralMulti),\
+               faraday_kernels=(Ar_SingDiag_integralDbl,\
+                                Ar_SingOffdiag_integralMulti,\
+                                Ar_NonsingDiag_integralDbl,\
+                                Ar_NonsingOffdiag_integralMulti)):
 
     if mirror:
         mirror_sign=-1
@@ -784,7 +808,50 @@ class Discretization(object):
         if sommerfeld_rp: raise NotImplementedError
         else: return ImpedanceMatrix(self,k,gap=gap,mirror=True,nonsingular=nonsingular,**kwargs)
 
-    def get_excitation(self,Er,Ez):
+    def get_excitation_t_phi(self,Ex_fn,Ey_fn,Ez_fn,alpha=0,Nphis=24):
+
+        assert hasattr(Ex_fn,'__call__') and hasattr(Ey_fn,'__call__') and hasattr(Ez_fn,'__call__'),\
+            '`Er` and `Ez` must be vectorized functions of coordinates (x,y,z)!'
+
+        Z = self.subnode_zs[np.newaxis,:,:] # shape is (1, Nnodes,Nsubnodes)
+        R = self.subnode_Rs[np.newaxis,:,:]
+        dPhi = 2*np.pi/Nphis #If source has cylindrical symmetry, no need for `Nphis>1` (and excitations for `alpha!=0` would be zero)
+        Phi = np.arange(0,2*np.pi,dPhi)[:,np.newaxis,np.newaxis]
+        ExpAlpha = np.exp(-1j*alpha*Phi)
+        CosTheta = self.subnode_cos[np.newaxis, :, :] # Note: `\theta` was also elsewhere called `\gamma`
+        SinTheta = self.subnode_sin[np.newaxis, :, :]
+
+        CosPhi = np.cos(Phi)
+        SinPhi = np.sin(Phi)
+        X = R*CosPhi
+        Y = R*SinPhi
+
+        Ex = Ex_fn(X,Y,Z)
+        Ey = Ey_fn(X,Y,Z)
+        Ez = Ez_fn(X,Y,Z)
+
+        # Now we have to convert into `et`, `ephi`
+        # Use `er` as an intermediary, since `\hat{r} = \hat{x} * \cos(\phi) + \hat{y} * \sin(\phi)
+        Er = Ex * CosPhi + Ey * SinPhi
+
+        # Compute Et and Vt
+        #`\hat{t}=\hat{z] \cos\theta + \hat{r} \sin\theta`, where `theta=0` is pointing vertically
+        Et = Ez * CosTheta + Er * SinTheta
+        EtPhiAvg = np.mean(Et * ExpAlpha, axis=0) #Take alpha-average across `Phi` axis
+        Vt = np.sum( EtPhiAvg * self.subnode_Ts * self.subnode_dts, axis=-1) #for each node, integrate all subnodes
+
+        # Compute Ephi and Vphi
+        # Since `\hat{x}` is along CosPhi and `\hat{y}` along SinPhi, `\hat{phi} = \hat{y} CosPhi - \hat{x} SinPhi`
+        Ephi = -Ex * SinPhi + Ey * CosPhi
+        EphiPhiAvg = np.mean(Ephi * ExpAlpha, axis=0) #Take alpha-average across `Phi` axis
+        Vphi = np.sum( EphiPhiAvg * self.subnode_Ts * self.subnode_dts, axis=-1) #for each node, integrate all subnodes
+
+        # Return the "generalized potential" across each node
+        # We want two column vectors (which can later be stacked)
+        # Remember that we will want `j = solve(Z, -excitation)`
+        return np.matrix( Vt ).T #,np.matrix( Vphi ).T  # Disable the `phi` component for now
+
+    def get_excitation_t(self,Er,Ez):
 
         assert hasattr(Er,'__call__') and hasattr(Ez,'__call__'),\
             '`Er` and `Ez` must be vectorized functions of coordinates (r,z)!'
@@ -793,22 +860,39 @@ class Discretization(object):
         Rs_flat = self.subnode_Rs.flatten()
         Ezs = Ez(Rs_flat,zs_flat).reshape( (self.Nnodes,self.Nsubnodes) )
         Ers = Er(Rs_flat,zs_flat).reshape( (self.Nnodes,self.Nsubnodes) )
+        #`\hat{t}=\hat{z] \cos\theta + \hat{r} \sin\theta`, where `theta=0` is pointing vertically
         Ets = Ezs * self.subnode_cos + Ers * self.subnode_sin
         Vts = np.sum( Ets * self.subnode_Ts * self.subnode_dts, axis=-1) #for each node, integrate all subnodes
 
         # Return the "generalized potential" across each node
         return np.matrix( Vts ).T #Remember that we will want `j = solve(Z, -excitation)`
 
+    #Legacy definition
+    get_excitation = get_excitation_t
+
 def ImpedanceMatrix(D,k,gap=1, mirror=False,\
                     nonsingular=True, display=True, \
-                  coul_kernels=(Spatial_Coul_SingDiag_integralDbl,\
-                                Spatial_Coul_SingOffdiag_integral,\
-                                Spatial_Coul_NonsingDiag_integralDbl,\
-                                Spatial_Coul_Nonsing_integral), \
-                  faraday_kernels=(Spatial_Ar_SingDiag_integralDbl,\
-                                Spatial_Ar_SingOffdiag_integral,\
-                                Spatial_Ar_NonsingDiag_integralDbl,\
-                                Spatial_Ar_Nonsing_integral)):
+                  coul_kernels=(Coul_SingDiag_integralDbl,\
+                                Coul_SingOffdiag_integral,\
+                                Coul_NonsingDiag_integralDbl,\
+                                Coul_Nonsing_integral), \
+                  faraday_kernels=(Ar_SingDiag_integralDbl,\
+                                Ar_SingOffdiag_integral,\
+                                Ar_NonsingDiag_integralDbl,\
+                                Ar_Nonsing_integral)):
+
+    # Here are the standard integral calculators
+    # Coulomb integrals:
+    # CoulSingDiag = Coul_SingDiag_integralDbl,
+    # CoulSingOffdiag = Coul_SingOffdiag_integral
+    # CoulNonsingDiag = Coul_NonsingDiag_integralDbl
+    # CoulNonsingOffdiag = Coul_Nonsing_integral
+
+    # Faraday integrals:
+    # ArSingDiag = Ar_SingDiag_integralDbl
+    # ArSingOffdiag = Ar_SingOffdiag_integral
+    # ArNonsingDiag = Ar_NonsingDiag_integralDbl
+    # ArNonsingOffdiag = Ar_Nonsing_integral
 
     if k==0:
         type1 = 'quasistatic'
