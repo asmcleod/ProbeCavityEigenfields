@@ -5,6 +5,7 @@ from scipy.integrate import quad,nquad
 from numba import njit
 from common.log import Logger
 from common import numerical_recipes as numrec
+from common.baseclasses import AWA
 import time
 
 quadlimit=100
@@ -522,123 +523,87 @@ def Ar_NonsingOffdiag_integralMulti(r1, r2, dz,\
     # factor of 2 emulates 0 to 2*pi, divisor enforces average
     return 2 * ai[0] / (2 * np.pi) * 1j
 
-#--- Matrix builders
+#--- Excitation profiles
 
-def get_WUpperTri_matrix(wzs):
-    "This is basically an indefinite integral calculator in z-axis."
+class EFieldExcitation(object): #For inheritance only
 
-    N = len(wzs)
-    WUpperTri = np.matrix([wzs] * N).T  # weights change along row index
-    WUpperTri[np.tril_indices(N, -1)] = 0  # make lower triangle zero below diagonal
-    np.fill_diagonal(WUpperTri, .5 * wzs)  # half-weights on diagonal
+    _kmin = 1e-4
 
-    return WUpperTri
+class ConstantEField(EFieldExcitation):
 
-def MoM_matrix(zs,wzs,Rs,k,\
-               gap=1,mirror=False,faraday=True,nonsingular=True,\
-               coul_kernels=(Coul_SingDiag_integralDbl,\
-                             Coul_SingOffdiag_integralMulti,\
-                                Coul_NonsingDiag_integralDbl,\
-                                Coul_NonsingOffdiag_integralMulti),\
-               faraday_kernels=(Ar_SingDiag_integralDbl,\
-                                Ar_SingOffdiag_integralMulti,\
-                                Ar_NonsingDiag_integralDbl,\
-                                Ar_NonsingOffdiag_integralMulti)):
+    def __init__(self,ex=0,ey=0,ez=1): #Basic constant excitation
 
-    if mirror:
-        mirror_sign=-1
-        inttype='mirror'
-    else:
-        mirror_sign=+1
-        inttype='self'
+        self.ex = ex
+        self.ey = ey
+        self.ez = ez
 
-    CoulSingDiag,CoulSingOffdiag,\
-        CoulNonsingDiag, CoulNonsingOffdiag = coul_kernels
-    ArSingDiag,ArSingOffdiag,\
-        ArNonsingDiag, ArNonsingOffdiag= faraday_kernels
+    def __call__(self,x,y,z):
 
-    Logger.write('Computing singular part of %s interaction by spatial quadrature...'%inttype)
+        ones = np.ones(np.broadcast(x,y,z).shape) # a space-filling array
+        Ex = self.ex * ones
+        Ey = self.ey * ones
+        Ez = self.ez * ones
 
-    Zs = zs + gap
-    Nzs = len(Zs)
-    drs = np.gradient(Rs) / wzs
+        return Ex,Ey,Ez
 
-    dRs1 = drs[np.newaxis, :]
-    dRs2 = drs[:, np.newaxis]
-    WUpperTri = get_WUpperTri_matrix(wzs)
-    WLowerTri = WUpperTri.T
+class EBesselBeamFF(EFieldExcitation):
 
-    global Coul, Ar
-    Coul = np.zeros((Nzs,) * 2, dtype=np.complex)
-    Ar = np.zeros((Nzs,) * 2, dtype=np.complex)
+    def __init__(self,angle=60,k=2 * np.pi * .003, z0=0):
 
-    t0 = time.time()
-    for i in range(Nzs):
-        for j in range(Nzs):
-            if j < i: continue  # only do the upper triangle
+        if k==0: k=self._kmin
 
-            wz1,wz2 = wzs[i], wzs[j]
-            R1, R2 = Rs[i], Rs[j]
-            dRdz1, dRdz2 = drs[i], drs[j]
-            z1, z2 = Zs[i], Zs[j]
-            dz = np.abs(z2 - mirror_sign*z1)
+        anglerad = np.deg2rad(angle)
+        self.k = k
+        self.q = k * np.sin(anglerad)
+        self.kz = -k * np.cos(anglerad)
+        self.z0=z0
 
-            #-- Singular part
-            if i==j and not mirror:
-                Coul[i, i] += CoulSingDiag(R1, dRdz1, wz1, k)
+    def __call__(self,x,y,z):
 
-                if faraday:
-                    Ar[i,i] += ArSingDiag(R1, dRdz1, wz1, k)
+        r = np.sqrt(x ** 2 + y ** 2)
+        CosPhi = x/r; SinPhi = y/r #Sine and cosine of azimuthal angle `phi`
+        Exp = np.exp(1j * self.kz * (z - self.z0))
+        J0 = j0(self.q * r)
+        J1 = j1(self.q*r)
 
-                if not nonsingular: continue
+        Ez = self.q * J0 * Exp / self.k
+        Er = self.kz*J1*Exp/self.k
 
-                #-- Nonsingular part
-                Coul[i,j] += CoulNonsingDiag(R1, dRdz1, wz1, k)
+        # `Ex/Er =  \hat{r} \cdot \hat{x} = \cos{\phi}
+        # `Ey/Er =  \hat{r} \cdot \hat{y} = \sin{\phi}
+        Ex = CosPhi * Er
+        Ey = SinPhi * Er
 
-                if faraday:
-                    Ar[i,j] += ArNonsingDiag(R1, dRdz1, wz1, k)
+        return Ex,Ey,Ez
 
-            else:
-                Coul[i, j] += CoulSingOffdiag(R1, R2, dz, \
-                                              dRdz1, dRdz2, \
-                                              wz1, wz2, k)
-                if faraday:
-                    Ar[i,j] += ArSingOffdiag(R1, R2, dz, \
-                                              dRdz1, dRdz2, \
-                                              wz1, wz2, k)
+class EPlaneWaveFF(EFieldExcitation):
 
-                if not nonsingular: continue
+    def __init__(self, angle=60, k=2 * np.pi * .003, e0 = -1):
 
-                #-- Nonsingular part
-                Coul[i,j] += CoulNonsingOffdiag(R1, R2, dz, \
-                                              dRdz1, dRdz2, \
-                                              wz1, wz2, k)
-                if faraday:
-                    Ar[i,j] += ArNonsingOffdiag(R1, R2, dz, \
-                                              dRdz1, dRdz2, \
-                                              wz1, wz2, k)
+        if k==0: k=self._kmin
 
-    dt = time.time() - t0
-    Logger.write('\tTotal quadrature time: %1.2fs, time per quadrature evaluation: %1.2Es' % (dt, dt / Nzs ** 2))
+        anglerad = np.deg2rad(angle)
+        self.k = k
+        self.q = -k * np.sin(anglerad)
+        self.kz = -k * np.cos(anglerad) #Wave vector is actually antiparallel to `\hat{\theta}}`-direction
+        self.e0 = e0
 
-    triu_inds = np.triu_indices(Nzs, k=1)
-    tril_inds = [triu_inds[1], triu_inds[0]]
-    Coul[tril_inds] = Coul[triu_inds]
-    Ar[tril_inds] = Ar[triu_inds]
+    def __call__(self, x, y, z):
 
-    FaradKernel = Coul - mirror_sign * dRs1 * dRs2 * Ar
+        PW = np.exp( 1j*(self.q * x
+                         + self.kz*z )) #plane wave profile
 
-    # Integrate both variables to obtain radiative kernel
-    RadiativeKernel = -k**2 * (WLowerTri @ FaradKernel @ WUpperTri)
+        CosPhi = -self.kz / self.k
+        Ex = self.e0 * CosPhi * PW
+        Ey = Ex*0
+        SinPhi = -self.q / self.k
+        Ez = self.e0 * SinPhi * PW #it's clear that `Ex^2 + Ez^2 = e0^2`
 
-    # +P.build_interaction(mirror=False,FF=False,faraday=True,NF=True,\
-    #                                          kappa_max=np.inf,kappa_min=kappa_min,Nkappas=Nkappas)
-
-    return (mirror_sign*Coul + RadiativeKernel)
+        return Ex,Ey,Ez
 
 #--- Discretization of probe
 
-def get_probe_radii(zs,L=1000,z0=0,a=1,taper_angle=20,geometry='cone',Rtop=0):
+def get_BoR_radii(zs, L=1000, z0=0, a=1, taper_angle=20, geometry='cone', Rtop=0):
 
     #Establish location of tip and make tip coordinates
     global Rs
@@ -658,7 +623,7 @@ def get_probe_radii(zs,L=1000,z0=0,a=1,taper_angle=20,geometry='cone',Rtop=0):
 
     elif geometry=='ellipsoid':
         b=L/2.
-        R=np.sqrt(b*np.float(a)) #Maintains curvature of 1/a at tip
+        R=np.sqrt(b*float(a)) #Maintains curvature of 1/a at tip
         Rs=np.zeros(zs.shape)+\
            R*np.sqrt(1-(zs_tip-b)**2/b**2)
 
@@ -702,9 +667,10 @@ def get_probe_radii(zs,L=1000,z0=0,a=1,taper_angle=20,geometry='cone',Rtop=0):
 
     return Rs
 
-class Discretization(object):
+class BodyOfRevolution(object):
 
-    def __init__(self,Rs,zs,Nsubnodes=6,closed=False,display=True):
+    def __init__(self,Rs,zs,Nsubnodes=6,closed=False,display=True,
+                 remesh=True,quadrature='GL',interpolation='quadratic'):
 
         # --- Checks
         assert len(Rs) == len(zs)
@@ -713,20 +679,43 @@ class Discretization(object):
         self.Nsubnodes = Nsubnodes
 
         #--- Enforce open or closed geometry
-        # radii of origin + nodes + terminus, of length Nnodes+2
+        # radii of (origin + nodes + terminus) will have length = Nnodes+2
         if closed:
             Rmin = np.min(Rs)*1e-2
             if Rs[0]!=0:
                 dzdR = np.diff(zs)[0]/np.diff(Rs)[0]
-                z0 = -dzdR * Rs[0]
+                dR = Rmin - Rs[0]
+                z0 = zs[0] + dzdR * dR
                 zs = np.append([z0], zs)
                 Rs = np.append([Rmin], Rs)
                 zs -= z0 #In case our preprended z0 went negative
             if Rs[-1]!=0:
                 dzdR = np.diff(zs)[-1]/np.diff(Rs)[-1]
-                zT = +dzdR * Rs[-1]
+                dR = Rmin - Rs[-1]
+                zT = zs[-1] + dzdR * dR
                 zs = np.append(zs, [zT])
                 Rs = np.append(Rs, [Rmin])
+
+        #--- Re-mesh to quadrature-evaluatd values of annualar coordinate "t", if requested
+        if remesh:
+            if display: Logger.write('Re-meshing provided geometry to quadrature points along annular coordinate `t`...')
+            # Compute the annular coordinates for each supplied radius
+            drs = np.gradient(Rs)
+            dzs = np.gradient(zs)
+            dts = np.sqrt(drs**2+dzs**2)
+            ts = np.cumsum(dts)
+            self.ts0=ts
+            self.zs0=zs
+            self.Rs0=Rs
+
+            # Build interpolators and determine target interpolation points
+            zs = AWA(zs,axes=[ts]); Rs = AWA(Rs,axes=[ts])
+            ts,_ = numrec.GetQuadrature(len(ts),xmin=ts.min(),xmax=ts.max(),
+                                        quadrature=quadrature)
+
+            # Interpolate, replacing earlier values of `zs`, `Rs`
+            zs = zs.interpolate_axis(ts,axis=0,kind=interpolation)
+            Rs = Rs.interpolate_axis(ts,axis=0,kind=interpolation)
 
         # --- Assign node coordinates and internal intervals
         self.node_terminal_Rs = Rs #Use whatever terminal values were supplied
@@ -734,6 +723,7 @@ class Discretization(object):
         self.node_Rs = np.array(Rs[1:-1]) #Internal points comprise the nodes
         self.node_zs = np.array(zs[1:-1])
         self.Nnodes = len(self.node_zs)
+
         if display: Logger.write('Discretizing body of revolution over %i annular nodes and %i subnodes...'\
                                  %(self.Nnodes,self.Nsubnodes))
 
@@ -808,10 +798,10 @@ class Discretization(object):
         if sommerfeld_rp: raise NotImplementedError
         else: return ImpedanceMatrix(self,k,gap=gap,mirror=True,nonsingular=nonsingular,**kwargs)
 
-    def get_excitation_t_phi(self,Ex_fn,Ey_fn,Ez_fn,alpha=0,Nphis=24):
+    def get_excitation_t_phi(self,efield_excitation,alpha=0,Nphis=24): #`alpha` is the azimuthal harmonic
 
-        assert hasattr(Ex_fn,'__call__') and hasattr(Ey_fn,'__call__') and hasattr(Ez_fn,'__call__'),\
-            '`Er` and `Ez` must be vectorized functions of coordinates (x,y,z)!'
+        assert isinstance(efield_excitation,EFieldExcitation),\
+            'Excitation source must be an instance of `EFieldExcitation`!'
 
         Z = self.subnode_zs[np.newaxis,:,:] # shape is (1, Nnodes,Nsubnodes)
         R = self.subnode_Rs[np.newaxis,:,:]
@@ -826,9 +816,7 @@ class Discretization(object):
         X = R*CosPhi
         Y = R*SinPhi
 
-        Ex = Ex_fn(X,Y,Z)
-        Ey = Ey_fn(X,Y,Z)
-        Ez = Ez_fn(X,Y,Z)
+        Ex,Ey,Ez = efield_excitation(X,Y,Z)
 
         # Now we have to convert into `et`, `ephi`
         # Use `er` as an intermediary, since `\hat{r} = \hat{x} * \cos(\phi) + \hat{y} * \sin(\phi)
@@ -838,20 +826,24 @@ class Discretization(object):
         #`\hat{t}=\hat{z] \cos\theta + \hat{r} \sin\theta`, where `theta=0` is pointing vertically
         Et = Ez * CosTheta + Er * SinTheta
         EtPhiAvg = np.mean(Et * ExpAlpha, axis=0) #Take alpha-average across `Phi` axis
-        Vt = np.sum( EtPhiAvg * self.subnode_Ts * self.subnode_dts, axis=-1) #for each node, integrate all subnodes
+        Vt = np.sum( EtPhiAvg * self.subnode_Ts * self.subnode_dts, axis=-1) #for each node, integrate over all subnodes
 
         # Compute Ephi and Vphi
         # Since `\hat{x}` is along CosPhi and `\hat{y}` along SinPhi, `\hat{phi} = \hat{y} CosPhi - \hat{x} SinPhi`
         Ephi = -Ex * SinPhi + Ey * CosPhi
         EphiPhiAvg = np.mean(Ephi * ExpAlpha, axis=0) #Take alpha-average across `Phi` axis
-        Vphi = np.sum( EphiPhiAvg * self.subnode_Ts * self.subnode_dts, axis=-1) #for each node, integrate all subnodes
+        Vphi = np.sum( EphiPhiAvg * self.subnode_Ts * self.subnode_dts, axis=-1) #for each node, integrate over all subnodes
 
         # Return the "generalized potential" across each node
         # We want two column vectors (which can later be stacked)
         # Remember that we will want `j = solve(Z, -excitation)`
-        return np.matrix( Vt ).T #,np.matrix( Vphi ).T  # Disable the `phi` component for now
+        return np.matrix( Vt ).T,np.matrix( Vphi ).T
 
-    def get_excitation_t(self,Er,Ez):
+    #Legacy definition
+    get_excitation = get_excitation_t_phi
+
+    #2023.05.25 --- This function is retired
+    def get_excitation_old(self,Er,Ez):
 
         assert hasattr(Er,'__call__') and hasattr(Ez,'__call__'),\
             '`Er` and `Ez` must be vectorized functions of coordinates (r,z)!'
@@ -867,8 +859,9 @@ class Discretization(object):
         # Return the "generalized potential" across each node
         return np.matrix( Vts ).T #Remember that we will want `j = solve(Z, -excitation)`
 
-    #Legacy definition
-    get_excitation = get_excitation_t
+#Legacy name
+Discretization = BodyOfRevolution
+
 
 def ImpedanceMatrix(D,k,gap=1, mirror=False,\
                     nonsingular=True, display=True, \
@@ -907,7 +900,7 @@ def ImpedanceMatrix(D,k,gap=1, mirror=False,\
         mirror_sign=+1
         type2='self'
 
-    if display: Logger.write('Preparing %s %s impedance matrix...'%(type1,type2))
+    if display: Logger.write('Preparing %s %s impedance matrix at k=%1.2G...'%(type1,type2,k))
 
     CoulSingDiag,CoulSingOffdiag,\
         CoulNonsingDiag, CoulNonsingOffdiag = coul_kernels
@@ -925,7 +918,7 @@ def ImpedanceMatrix(D,k,gap=1, mirror=False,\
     G_farad_cache={}
 
     #-- The loop
-    Zmat = np.zeros( (D.Nnodes,)*2, dtype=np.complex)
+    Zmat = np.zeros( (D.Nnodes,)*2, dtype=complex)
     t0 = time.time()
     for i in range(D.Nnodes):
 

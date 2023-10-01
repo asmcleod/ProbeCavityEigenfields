@@ -1,5 +1,8 @@
 import numpy as np
+import os
 import time
+import copy
+import pickle
 from numbers import Number
 from scipy import linalg
 from scipy.signal import invres,unique_roots
@@ -26,6 +29,54 @@ def get_superset_indices(subset,superset):
     subset_inds,superset_inds = zip(*sorted(zip(subset_inds,superset_inds)))
 
     return np.array(superset_inds)
+
+
+probe_models_dir = os.path.join(os.path.dirname(__file__),'Probe models')
+if not os.path.exists(probe_models_dir): os.mkdir(probe_models_dir)
+
+def save(obj,suffix=None,overwrite=False):
+
+    if isinstance(obj,ProbeSpectroscopy):
+        if isinstance(obj,ProbeFrequencySpectroscopyParallel): prefix = 'ProbeFrequencySpectroscopy'
+        elif isinstance(obj,ProbeGapSpectroscopyParallel): prefix = 'ProbeGapSpectroscopy'
+        else: prefix = 'ProbeSpectroscopy'
+    elif isinstance(obj,EncodedEigenfields): prefix = 'EncodedEigenfields'
+    else: raise TypeError('Type %s not recognized!'%type(obj))
+
+    probe_name = obj.get_probe().get_name()
+
+    if suffix: filename = '%s_%s_%s.pickle'%(prefix,probe_name,suffix)
+    else: filename = '%s_%s.pickle'%(prefix,probe_name)
+    path = os.path.join(probe_models_dir,filename)
+
+    if os.path.exists(path) and not overwrite:
+        raise OSError('File "%s" already exists!  To overwrite, include keyword `overwrite=True`...')
+
+    with open(path,'wb') as f:
+        pickle.dump(obj,f)
+        print('File "%s" saved!'%path)
+
+def load(filepath,overwrite=False):
+
+    prev_val = PCE.ProbesCollection._overwrite
+    if overwrite: #(temporarily) set to overwrite if commanded
+        PCE.ProbesCollection.overwrite(True)
+
+    try_path = os.path.join(probe_models_dir,filepath)
+    if not os.path.exists(filepath) and os.path.exists(try_path):
+        filepath = try_path
+
+    try:
+        with open(filepath,'rb') as f:
+            obj = pickle.load(f)
+        PCE.ProbesCollection.overwrite(prev_val)
+    except ValueError as e:
+        PCE.ProbesCollection.overwrite(prev_val) # Whether error or not, make sure previous overwrite status is resotred
+        msg = e.args[0]
+        msg += '  You may avert this error by passing keyword `overwrite=True` to `load`!'
+        raise ValueError(msg)
+
+    return obj
 
 #--- Probe Spectroscopy
 
@@ -66,7 +117,7 @@ class ProbeSpectroscopy(object):
         return np.array(sorted(self._recorded_eigenrhos.keys()))
 
     def get_probe_at_coord(self, coord,
-                           update_charges=True, update_Zself=True,
+                           update_charges=True, update_Zself=True,update_Zmirror=True,
                            verbose=True):
 
         coords = self.get_coords()
@@ -82,12 +133,17 @@ class ProbeSpectroscopy(object):
             if verbose: Logger.write('\tUpdating self impedance...')
             ZSelf = self._recorded_self_impedances[best_coord]
             self._P._ZSelf = ZSelf
+        if update_Zmirror:
+            if verbose: Logger.write('\tUpdating mirror impedance...')
+            ZMirror = self._recorded_mirror_impedances[best_coord]
+            self._P._ZMirror = ZMirror
 
         return self.get_probe()
 
-    def distance(self, xm, xn, m, n, by_eigenrho=True):
-        """Get 'distance' between eigencharge at coordinate `xm`, index `m`,
-        and that at coordinate `xn`, index `n`."""
+    # 2023.05.31 - Deprecated in favor of more parallelized and transparent `eigensets_overlap_matrix`
+    """def distance(self, xm, xn, m, n, by_eigenrho=True):
+        "Get 'distance' between eigencharge at coordinate `xm`, index `m`,
+        and that at coordinate `xn`, index `n`."
 
         if by_eigenrho:
             rho_m = self._recorded_eigenrhos[xm][m]
@@ -128,9 +184,54 @@ class ProbeSpectroscopy(object):
         # disti2 = (np.log(-rho1.imag)-np.log(-rho2.imag))**2
         # distance=np.sqrt(distr2+disti2)
 
-        return distance
+        return distance"""
 
-    def classify_eigensets(self, Nmodes=10, reversed=False, **kwargs):
+    def eigenrhos_distance(self,xm, xn, Nmodes=10):
+
+        rhosn = self._recorded_eigenrhos[xn][:Nmodes][:,np.newaxis]
+        rhosm = self._recorded_eigenrhos[xm][:Nmodes][np.newaxis,:]
+
+        distances = rhosn-rhosm #entry `n,m` will correspond to distance from n to m
+        distances /= (rhosn+rhosm)/2 # Divide by average rho value
+
+        return distances
+
+    def eigencharges_overlap_matrix(self, xm, xn,
+                                    Qn=None,Qm=None, Nmodes=10):
+        """If `Qm` or `Qn` are not provided, they will be taken from `self._recorded_eigencharges` (unsorted)."""
+
+        if Qm is None or Qn is None:
+            Qm = self._recorded_eigencharges[xm][:Nmodes]
+            Qn = self._recorded_eigencharges[xn][:Nmodes]
+        else:
+            assert len(Qn)==len(Qm)
+        Nmodes = np.min( (Nmodes, len(Qm), len(Qn)) )
+
+        Qm = np.matrix(Qm).T  # column vectors
+        Qn = np.matrix(Qn).T  # column vectors
+
+        #--- Get overlap operator at "midpoint"
+        # `O = (Om + On)/2`
+        # `Om = -PhiM = PhiS / rho[m]` whenever operating on `Qm`
+        # because `(rho[m] Zm + Zs) Qm = 0`, so `Qm * Zs/rho[m] * Qm` is maximized at `~1`
+
+        Om = self._recorded_self_impedances[xm]
+        On = self._recorded_self_impedances[xn]
+
+        #Qm has to be divided by rhos[m] before impedance matrix, so make a diagonal matrix that does it
+        InvRhom = np.matrix(np.diag(1/self._recorded_eigenrhos[xm][:Nmodes]))
+        InvRhon = np.matrix(np.diag(1/self._recorded_eigenrhos[xn][:Nmodes]))
+
+        overlap1 = np.array((Qn).T @ Om @ (Qm @ InvRhom))
+        overlap2 = np.array((Qn @ InvRhon).T @ On @ (Qm))
+        overlap1 = (overlap1 + overlap1.T)/2
+        overlap2 = (overlap2 + overlap2.T)/2
+        #overlap1 = np.array((Qn).T @ Om @ Qm @ InvRhom))
+        #overlap2=1
+
+        return np.array(overlap1+overlap2)/2 #entry [n,m] is overlap between eigencharge n and m
+
+    def classify_eigensets(self, Nmodes=10, reversed=False, by_rho=True, debug=False, **kwargs):
         # This is the robust way of labeling eigensets by an eigenindex
         # in a way that is uniform across the internal coordinates
         # `reversed` is untested
@@ -150,6 +251,7 @@ class ProbeSpectroscopy(object):
             # the exact output you're looking for:
             sys.stdout.write('\tProgress: %1.2f%%'%progress)
             sys.stdout.flush()
+            if debug: print('\n coordind=%1.2f'%coordind)
 
             coord = coords[coordind]
             N = np.min((Nmodes, len(self._recorded_eigenrhos[coord])))
@@ -159,14 +261,24 @@ class ProbeSpectroscopy(object):
 
             else:
                 coord_prev = coords[coordind - 1]
-                M = np.min((Nmodes, len(self._recorded_eigenrhos[coord_prev])))
+                #M = np.min((Nmodes, len(self._recorded_eigenrhos[coord_prev])))
 
-                connections = []
-                for n in range(N):
-                    ds = [self.distance(coord_prev, coord, m, n,
-                                        **kwargs) for m in range(M)]
-                    m = np.argmin(ds)
-                    connections.append(connectivity[coordind - 1][m])
+                if by_rho:
+                    distances=self.eigenrhos_distance(xm=coord_prev, xn=coord, Nmodes=Nmodes)
+                    connections = []
+                    for n in range(N):
+                        # For this eigenset at `coord_prev` and row `n`, find the column `m` at `coord` that matches
+                        m = np.argmin(np.abs(distances[n]))
+                        if debug: print('by rho',n,m)
+                        connections.append(connectivity[coordind - 1][m])
+                else:
+                    overlaps = self.eigencharges_overlap_matrix(xm=coord_prev, xn=coord, Nmodes=Nmodes)
+                    connections = []
+                    for n in range(N):
+                        # For this eigenset at `coord_prev` and row `n`, find the column `m` at `coord` that matches
+                        m = np.argmax(np.abs(overlaps)[n])
+                        if debug: print('by overlap',n,m)
+                        connections.append(connectivity[coordind - 1][m])
 
             connectivity.append(connections)
 
@@ -177,8 +289,8 @@ class ProbeSpectroscopy(object):
         all_charges = []
         connection_index = 0
         while True:
-            rhos = [];
-            charges = [];
+            rhos = []
+            charges = []
             assoc_coords = []
             for coordind, coord in enumerate(coords):
                 connections = connectivity[coordind]
@@ -201,14 +313,16 @@ class ProbeSpectroscopy(object):
 
     def __call__(self,*args,**kwargs): return self.classify_eigensets(*args,**kwargs)
 
-    def get_eigenrhos_AWA(self,Nmodes=10,recompute=False,verbose=True):
+    def get_eigenrhos_AWA(self,Nmodes=None,recompute=False,verbose=True):
 
         try:
             precomputed = self._eigenrhos_AWA
-            if Nmodes != len(precomputed) or recompute: #If we need more modes than we have, also recompute
+            if (Nmodes and Nmodes != len(precomputed)) or recompute: #If we need more modes than we have, also recompute
                 raise AttributeError
-            return precomputed
+            return precomputed[:Nmodes]
         except AttributeError: pass #proceed to evaluate
+
+        if Nmodes is None: Nmodes=10
 
         if self.sorted_eigenrhos is None:
             raise RuntimeError('Call the spectroscopy instance first (i.e. `Spectroscopy()` ) to sort eigensets!')
@@ -234,43 +348,53 @@ class ProbeSpectroscopy(object):
 
         return self._eigenrhos_AWA
 
-    def align_eigencharge_signs(self,eigencharges, coords, eigenindex):
+    def align_eigencharge_signs(self,eigencharges_grid, coords):
         """Align a set of `eigencharges` all at `eigenindex` but varying across `coords`
         so that they do not flip in sign by -1."""
 
-        aligned_eigencharges = [ eigencharges[0] ]
+        eigencharges_grid = np.asanyarray(eigencharges_grid)
+        assert eigencharges_grid.shape[1] == len(coords),\
+            "`eigencharges_grid` should have shape `Nmodes` x `# coordinates`."
+        Nmodes = eigencharges_grid.shape[0]
+
+        aligned_eigencharges = [ eigencharges_grid[:,0] ] #All modes at first coordinate
         for i in range(len(coords)-1):
+
+            import sys
+            progress=i / len(coords)*100
+            sys.stdout.write('\r')
+            sys.stdout.write('\tProgress: %1.2f%%'%progress)
+            sys.stdout.flush()
 
             xm = coords[i]
             xn = coords[i+1]
-            Qm = np.matrix(aligned_eigencharges[-1]).T
-            Qn = np.matrix(eigencharges[i+1]).T
-            charge_to_add = eigencharges[i+1]
-            # --- Get overlap operator at "midpoint" between `i,i+1`
-            # `O = (Om + On)/2`
-            # `Om = -PhiM = PhiS / rho[m]` whenever operating on `Qm`
-            # because `(rho[m] Zm + Zs) Qm = 0`, so `Qm * Zs/rho[m] * Qm` is maximized at `~1`
-            Om = self._recorded_self_impedances[xm] / self._recorded_eigenrhos[xm][eigenindex]
-            On = self._recorded_self_impedances[xn] / self._recorded_eigenrhos[xn][eigenindex]
-            Oavg = (Om + On) / 2
+            Qm = aligned_eigencharges[-1] #Already aligned in sign
+            Qn = eigencharges_grid[:,i+1] #Not yet aligned in sign
 
-            # If overlap is negative, the added charge needs to be flipped in sign
-            overlap = complex( Qm.T @ Oavg @ Qn )
-            if overlap.real<0: charge_to_add = -charge_to_add
+            overlaps = self.eigencharges_overlap_matrix(xm, xn,
+                                                        Qn=Qn, Qm=Qm,
+                                                        Nmodes=Nmodes)
 
-            aligned_eigencharges.append(charge_to_add)
+            charges_to_add = [-Q if overlaps[ei,ei].real<0 else Q for ei,Q in enumerate(Qn)]
+
+            aligned_eigencharges.append(charges_to_add)
+
+        aligned_eigencharges = np.array(aligned_eigencharges)
+        aligned_eigencharges = aligned_eigencharges.transpose((1,0,2)) # Now place `coords` axis first, just like the input array
 
         return aligned_eigencharges
 
-    def get_eigencharges_AWA(self,Nmodes=10,recompute=False,
+    def get_eigencharges_AWA(self,Nmodes=None,recompute=False,
                              verbose=True):
 
         try:
             precomputed = self._eigencharges_AWA
-            if Nmodes != len(precomputed) or recompute: #If we need more modes than we have, also recompute
+            if (Nmodes and Nmodes != len(precomputed)) or recompute: #If we need more modes than we have, also recompute
                 raise AttributeError
-            return precomputed
+            return precomputed[:Nmodes]
         except AttributeError: pass #proceed to evaluate
+
+        if Nmodes is None: Nmodes=10
 
         if self.sorted_eigenrhos is None:
             raise RuntimeError('Call the spectroscopy instance first (i.e. `Spectroscopy()` ) to sort eigensets!')
@@ -292,36 +416,34 @@ class ProbeSpectroscopy(object):
                                      ind_sets) ]
 
         if verbose: Logger.write('\tAligning eigencharge signage...')
-        eigencharges_grid = [ self.align_eigencharge_signs(eigencharges,\
-                                                           coords=coords_common,\
-                                                           eigenindex=eigenindex) \
-                              for eigenindex,eigencharges in enumerate(eigencharges_grid) ]
+        eigencharges_grid_aligned = self.align_eigencharge_signs(eigencharges_grid, coords_common)
 
-        self._eigencharges_AWA = AWA(eigencharges_grid,axes=[None,coords_common,\
+        self._eigencharges_AWA = AWA(eigencharges_grid_aligned,axes=[None,coords_common,\
                                                             eigencharges_grid[0][0].axes[0]],\
                                      axis_names=['eigenindex','coordinate',\
                                                  eigencharges_grid[0][0].axis_names[0]])
 
         return self._eigencharges_AWA #Axes are eigenindex, coordinate, z-on-probe
 
-    def get_brightnesses_AWA(self,Nmodes=None,recompute=False,
-                             recompute_eigencharges=False,
-                             eigencharges_AWA=None,
-                             angles=np.linspace(0,90,20),
-                             verbose=True,**kwargs):
+    def get_eigenbrightness_AWA(self, Nmodes=None, recompute=False,
+                                eigencharges_AWA=None,
+                                angles=None,
+                                verbose=True, **kwargs):
 
         try:
             precomputed = self._brightnesses_AWA
             if (Nmodes and Nmodes != len(precomputed)) or recompute: #If we need more modes than we have, also recompute
                 raise AttributeError
-            return precomputed
+            return precomputed[:Nmodes]
         except AttributeError:
             import traceback
             pass #proceed to evaluate
 
+        if Nmodes is None: Nmodes=10
+
         if eigencharges_AWA is None:
             eigencharges_AWA = self.get_eigencharges_AWA(Nmodes,
-                                                         recompute=recompute_eigencharges,
+                                                         recompute=recompute,
                                                          verbose=verbose)
         coords=eigencharges_AWA.axes[1]
         if Nmodes:
@@ -331,10 +453,12 @@ class ProbeSpectroscopy(object):
 
         all_brightnesses=[]
         for coord in coords:
-            eigencharges = eigencharges_AWA.cslice[:,coord]
+            eigencharges = np.array(eigencharges_AWA.cslice[:,coord])
             P = self.get_probe_at_coord(coord,verbose=False)
-            brightnesses = [P.get_brightness(charge,angles=angles,**kwargs) \
-                            for charge in eigencharges]
+            brightnesses = P.get_brightness(eigencharges, illum_angles=angles, **kwargs) # vectorized over charge vectors
+            #Average over angles (first axis)
+            brightnesses=np.array(brightnesses)
+            brightnesses = np.mean(brightnesses,axis=0)
             all_brightnesses.append(brightnesses)
 
         self._brightnesses_AWA = AWA(all_brightnesses,
@@ -375,19 +499,19 @@ class ProbeSpectroscopy(object):
         plt.gcf().colorbar(cm.ScalarMappable(norm=norm, cmap=cmap),
                      cax=cax, orientation='vertical',label='coordinate')
 
-    def plot_eigenrhos(self,Nmodes=10):
+    def plot_eigenrhos(self,Nmodes=10,recompute=False,**kwargs):
 
         from matplotlib import pyplot as plt
         from matplotlib import cm,colors
         from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-        eigenrhos_AWA = self.get_eigenrhos_AWA(Nmodes=Nmodes)
+        eigenrhos_AWA = self.get_eigenrhos_AWA(Nmodes=Nmodes,recompute=recompute)
 
         cs = plotting.bluered_colors(len(eigenrhos_AWA))
         for rhos in eigenrhos_AWA:
             c = next(cs)
-            rhos.real.plot(color=c)
-            rhos.imag.plot(color=c,ls='--')
+            rhos.real.plot(color=c,**kwargs)
+            rhos.imag.plot(color=c,ls='--',**kwargs)
 
         plt.axhline(0,ls='--',color='k',alpha=.5)
 
@@ -422,18 +546,20 @@ def compute_eigenset_at_freq(P, freq, PhiM=False, **kwargs):
             # Zmirror = P.get_mirror_impedance(k=P.get_k(),nonsingular=False,recompute=True,display=False)
             Zmirror = P.get_mirror_impedance(k=P.get_k(), farfield=False, \
                                              recompute=True, sommerfeld=True, **kwargs)
+        else: Zmirror = P.get_mirror_impedance(recompute=False)
 
         rhos, Qs = P.solve_eigenmodes(condition_ZM=True, condition_ZS=False, ZMthresh=0, recompute_impedance=False)
         print('Finished freq=%1.2g, elapsed time: %1.2g s' % (freq, time.time() - t0))
 
-        return rhos, Qs, Zself
+        return rhos, Qs, Zself, Zmirror
 
-def compute_eigenset_at_gap(P, gap=1, k=0, sommerfeld=True, **kwargs):
+def compute_eigenset_at_gap(P, gap=1, k=0, sommerfeld=True,
+                            basis=None,**kwargs):
 
         print('Starting gap=%1.2g' % gap)
         t0 = time.time()
-        # Zself = P.get_self_impedance(k=P.get_k(),recompute=True,display=False)
 
+        #--- Set new gap and recompute mirror impedance
         P.set_gap(gap)
         if k is None: k=P.get_k()
 
@@ -441,13 +567,13 @@ def compute_eigenset_at_gap(P, gap=1, k=0, sommerfeld=True, **kwargs):
         if sommerfeld and 'kappa_max' not in kwargs:
             kwargs['kappa_max'] = 10*np.max( (1/gap, 1/P.get_a()) )
         Zmirror = P.get_mirror_impedance(k=k, recompute=True, sommerfeld=sommerfeld, **kwargs)
-
-        rhos, Qs = P.solve_eigenmodes(condition_ZM=True, condition_ZS=False, ZMthresh=0, recompute_impedance=False)
-        print('Finished gap=%1.2g, elapsed time: %1.2g s' % (gap, time.time() - t0))
-
         Zself = P.get_self_impedance(recompute=False, display=False)
 
-        return rhos, Qs, Zself
+        rhos, Qs = P.solve_eigenmodes(condition_ZM=True, condition_ZS=False, ZMthresh=0,basis=basis,
+                                      recompute_impedance=False,plot=False)
+        print('Finished gap=%1.2g, elapsed time: %1.2g s' % (gap, time.time() - t0))
+
+        return rhos, Qs, Zself, Zmirror
 
 class ProbeSpectroscopyParallel(ProbeSpectroscopy):
 
@@ -467,7 +593,7 @@ class ProbeSpectroscopyParallel(ProbeSpectroscopy):
                     self.removed_attrs[attr] = getattr(self.P, attr)
                     delattr(self.P, attr)
 
-        def __exit__(self,type, value, traceback): #last arguments are obligator
+        def __exit__(self,type, value, traceback): #last arguments are obligatory
             # --- Restore any removed Probe attributes
             for attr in self.removed_attrs:
                 setattr(self.P, attr,
@@ -475,6 +601,7 @@ class ProbeSpectroscopyParallel(ProbeSpectroscopy):
 
     def __init__(self,P, coords, eigenset_calculator=compute_eigenset_at_gap,\
                  ncpus=8, backend='multiprocessing', Nmodes=20, reversed=False, **kwargs):
+
         from joblib import Parallel, delayed, parallel_backend
 
         super().__init__(P)
@@ -496,15 +623,16 @@ class ProbeSpectroscopyParallel(ProbeSpectroscopy):
                     coords_sub = coords[nstart:nstop]
                     new_eigensets = parallel(delayed(eigenset_calculator)(P, coord, **kwargs) \
                                                                           for coord in coords_sub)
-                    print('got results!')
+                    Logger.write('\tParallel calculation retrieved %i results!'%ncpus)
                     eigensets = eigensets + new_eigensets
-                print('Time elapsed: ', time.time() - t0)
+                Logger.write('\tTime elapsed: ', time.time() - t0)
 
         for coord, eigenset in zip(coords, eigensets):
-            rhos, charges, ZSelf = eigenset
+            rhos, charges, ZSelf, ZMirror = eigenset
             P._eigenrhos = rhos
             P._eigencharges = charges
             P._ZSelf = ZSelf
+            P._ZMirror = ZMirror
             self.record(coord)
 
         # Run classification by eigenindex
@@ -534,9 +662,6 @@ class ProbeFrequencySpectroscopyParallel(ProbeSpectroscopyParallel):
                  Nmodes=20, reversed=False,
                  **kwargs):
 
-        #--- Make sure mirror impedance has been calculated
-        Zmirror = P.get_mirror_impedance(k=0, recompute=True, sommerfeld=False)
-
         #--- Hard-code the frequency calculator
         super().__init__(P, coords=freqs, eigenset_calculator=compute_eigenset_at_freq,
                          ncpus=ncpus, backend=backend, Nmodes=Nmodes, reversed=reversed,
@@ -546,16 +671,34 @@ class ProbeGapSpectroscopyParallel(ProbeSpectroscopyParallel):
 
     def __init__(self,P, gaps=np.logspace(-1.5,1,100),\
                  ncpus=8, backend='multiprocessing',\
-                 Nmodes=20, sommerfeld=True, reversed=False,
+                 Nmodes=20, sommerfeld=True,
+                 basis_gap=None,
+                 reversed=False,
                  **kwargs):
 
+        assert isinstance(Nmodes, int) and Nmodes > 0
+
         #--- Make sure self impedance has been calculated
+        ZSelf = P.get_self_impedance(k=P.get_k(), recompute=False)
+
+        if basis_gap:
+            print('We are computing an eigenset at gap=%1.2f, and using its first %i modes as a basis for forthcoming calculations!'%(basis_gap,Nmodes))
+            #--- Make sure we make the zeroth eigensolution available for the dispatched worker
+            compute_eigenset_at_gap(P, gap=basis_gap, k=0, sommerfeld=sommerfeld,
+                                    basis=None,**kwargs) #This will attach desired eigenset to `P`
+            # We will only need `Nmodes` of these!
+            kwargs['basis']=P.get_eigencharges()[:Nmodes] #Pass basis on to kwargs where it will be fed down to parallel jobs
+            print('Basis will have length %i'%kwargs['basis'].shape[0])
 
         #--- Hard-code the gap calculator
         kwargs['k'] = 0 #we insist on a quasistatic calculation, otherwise some features of this class become meaningless
         super().__init__(P, coords=gaps, eigenset_calculator=compute_eigenset_at_gap,
                          ncpus=ncpus, backend=backend, Nmodes=Nmodes, reversed=reversed,
                          sommerfeld=sommerfeld, **kwargs)
+
+    def Encode(self,*args,**kwargs):
+
+        return EncodedEigenfields(self,*args,**kwargs)
 
 class EncodedEigenfields(object):
     """This function condensed a `ProbeSpectroscopy` object
@@ -583,8 +726,8 @@ class EncodedEigenfields(object):
         Logger.write('Encoding eigenfields to gap=%1.2g across %i gap values from gap=%1.2g to %1.2g...' \
                      % ( gap0,len(gaps),gaps.min(),gaps.max() ) )
         ind0 = np.argmin( (gaps-gap0)**2 )
-        gap0 = gaps[ind0]
-        P0 = Spec.get_probe_at_coord(gap0)
+        self._gap0 = gaps[ind0]
+        P0 = Spec.get_probe_at_coord(self._gap0)
 
         # we take k=0 propagators to conform with the quasistatic context for the eigenfields
         dP = P0.getFourPotentialPropagators(farfield=False, k=0,
@@ -598,7 +741,7 @@ class EncodedEigenfields(object):
         for gap in gaps:
             Pgap = np.matrix(np.diag(np.exp(-gap*kappas)))
             ChargeMat = np.matrix( eigencharges_vs_gap.cslice[:,gap,:] ).T #column vectors of eigencharges
-            PhiMat = Pgap @ dP['Phi'] @ ChargeMat #This is already the Fourier transform multiplied by q
+            PhiMat = Pgap @ dP['Phi'] @ ChargeMat #This is already the Fourier transform of the potential multiplied by q
             PhisVsGap.append( np.array(PhiMat).T ) #append row vectors, axes are `eigenindex,q`
         Phis0 = PhisVsGap[ind0]
 
@@ -613,10 +756,9 @@ class EncodedEigenfields(object):
             PsiMats.append(PsiMat)
 
         #--- Package results
-        brightnesskwargs['average']=True
-        Brightnesses = Spec.get_brightnesses_AWA(Nmodes=Nmodes, recompute=False,
-                                                 eigencharges_AWA = eigencharges_vs_gap,
-                                                 **brightnesskwargs)[:Nmodes].T #Put coordinate (gaps) axis first
+        Brightnesses = Spec.get_eigenbrightness_AWA(Nmodes=Nmodes, recompute=False,
+                                                    eigencharges_AWA = eigencharges_vs_gap,
+                                                    **brightnesskwargs)[:Nmodes].T #Put coordinate (gaps) axis first
         Poles = Spec.get_eigenrhos_AWA(Nmodes=Nmodes, verbose=False).T #Put coordinate (gaps) axis first
         PsiMats = AWA(PsiMats, axes=[gaps, None,None],
                       axis_names=['gap', 'eigenindex n','eigenindex m'])
@@ -631,8 +773,11 @@ class EncodedEigenfields(object):
         self._do_cache=False
 
         #--- Attach probe with the correctly signed eigencharges
-        self.Probe=P0
+        self.Probe=copy.copy(P0) #Shallow copy, doesn't actively copy attributes, just references them
         self.Probe._eigencharges = eigencharges_vs_gap.cslice[:,gap0,:]
+        del self.Probe._gapSpectroscopy #Spectroscopy data is too enormous to keep
+
+    def get_probe(self): return self.Probe
 
     def cache(self,do_cache=True): self._do_cache = do_cache
 
@@ -684,8 +829,10 @@ class EncodedEigenfields(object):
 
         return self._PoleMats
 
-    def EradVsGap(self, at_gaps, freq, RMat0=None, rp=None, **kwargs):
+    def EradVsGap(self, at_gaps, freq, RMat0=None, Nmodes=None,rp=None,
+                  light_cone_buffer=2,record_rp_vals=False, **kwargs):
 
+        #--- Get ingredients and restrict to a narrower range of `Nmodes` if requested
         kappas = self.kappas
         dkappas = self.dkappas
         Phi0Vecs = self.Phi0Vecs #column vectors of scalar field vs kappa
@@ -693,14 +840,28 @@ class EncodedEigenfields(object):
         PsiMats = self.PsiMats(at_gaps)
         PoleMats = self.PoleMats(at_gaps)
 
+        if RMat0 is not None: Nmodes = RMat0.shape[0] #If a reflection matrix is provided, it has the number of modes desired
+        if Nmodes:
+            Phi0Vecs = Phi0Vecs[:Nmodes]
+            BVecs = BVecs[:Nmodes]
+            PsiMats = PsiMats[:Nmodes,:Nmodes]
+            PoleMats = PoleMats[:Nmodes,:Nmodes]
+
         #--- Get RMat for fields at reference gap
         if RMat0 is None:
+            #sometimes `rp` function "leak" the light cone, this lets us buffer it (we are anticipating imprecision in `rp`!)
             k = 2 * np.pi * freq
-            qs = np.sqrt(k ** 2 + kappas ** 2).real #This will keep us out of the light cone
+            light_cone_buffer = self.Probe.light_cone_buffer # a class attribute
+            qs = np.sqrt(k ** 2 * light_cone_buffer + kappas ** 2).real #This will keep us out of the light cone
             if isinstance(rp,Number): rp_vs_q=rp
             else:
                 rp_vs_q = rp(freq, qs, **kwargs) #rp will have to anticipate dimensionless arguments
                 rp_vs_q[np.isnan(rp_vs_q)+np.isinf(rp_vs_q)] = 0  # This is just probably trying to evaluate at too large a momentum
+            if record_rp_vals:
+                try: self.rp_vals_vs_q.append(rp_vs_q)
+                except AttributeError: pass
+            # Here we can see `Phi0Vecs` has column vectors that are the Hankel transform of the potential multiplied by q
+            # or, equivalently, they are the Hankel transform of the Ez-eigenfield
             RMat0 = Phi0Vecs.T @ np.diag(dkappas * rp_vs_q) @ Phi0Vecs
         else:
             assert RMat0.shape == PsiMats[0].shape,\
@@ -727,25 +888,27 @@ class EncodedEigenfields(object):
         return AWA(Erads, axes=[at_gaps], axis_names=['gap'])
 
     def EradSpectrumDemodulated(self, freqs, rp=None,
-                                gapmin=.1, amplitude=2,
+                                gapmin=.1, amplitude=2.,
                                 Ngaps=24, demod_order=5,
+                                record_rp_vals = False,
                                 **kwargs):
         T = PCE.Timer()
 
         #gaps, weights = get_cheb_zs_weights(Ncheb=Ngaps, A=amplitude, gapmin=gapmin, demod_order=demod_order)
         at_gaps,dgaps=numrec.GetQuadrature(xmin=gapmin,xmax=gapmin+2*amplitude,
-                                         N=Ngaps,quadrature=numrec.CC)
+                                           N=Ngaps,quadrature=numrec.CC)
 
         #--- Turn on caching for the duration of all frequencies, since gaps will be the same
         original_caching = self._do_cache
         self.cache(False)
+        if record_rp_vals: self.rp_vals_vs_q=[]
 
         #--- Execute the loop over frequency values
         EradsVsFreq = []
         if not hasattr(freqs, '__len__'): freqs = [freqs]
         for freq in freqs:
             print('\tComputing at freq=%1.3E...'%freq)
-            dErad = self.EradVsGap(at_gaps, freq, rp=rp, **kwargs)
+            dErad = self.EradVsGap(at_gaps, freq, rp=rp, record_rp_vals=record_rp_vals, **kwargs)
             EradsVsFreq.append(dErad)
 
             # --- Turn on caching for the duration of all frequencies, since gaps will be the same
@@ -759,7 +922,7 @@ class EncodedEigenfields(object):
         # --- Demodulate with chebyshev polynomials
         if demod_order:
             Logger.write('Demodulating...')
-            sns = PCE.demodulate(EradsVsFreq, demod_order=demod_order,Nts=Ngaps)
+            sns = PCE.demodulate(EradsVsFreq, demod_order=demod_order)
             result['Sn'] = sns
 
         """sns=[]
@@ -777,32 +940,47 @@ class EncodedEigenfields(object):
 
         return result
 
+    @staticmethod
+    def wrap_rp(rp,a_nm):
+
+        def wrapped_rp(freq_norm,q_norm):
+
+            freq_wn = freq_norm / (a_nm * 1e-7)
+            q_wn = q_norm / (a_nm * 1e-7)
+            # print('min k (wn): %1.3f'%np.min(2*np.pi*freq_wn)) #Debug messages to ensure we are outside the light cone
+            # print('min q (wn): %1.3f'%np.min(q_wn))
+
+            return rp(freq_wn,q_wn)
+
+        return wrapped_rp
+
     def getNormalizedSignal(self,freqs_wn,rp,
                             a_nm=30,amplitude_nm=50,demod_order=5,
-                            Ngaps=24*4,gapmin=.15,
-                            rp_norm = None,
-                            freqs_wn_norm = None):
+                            Ngaps=24*4,gapmin_nm=.3,
+                            rp_norm = None, freqs_wn_norm = None,
+                            **kwargs):
 
-        # Wrap the provided rp functions so they can expand out dimensionless frequencies and wavevectors
-        # The supplied reflection function should take `frequency (wavenumbers), q (wavenumbers)`
-        rp_wrapped = lambda freq,q: rp( freq / (a_nm * 1e-7),
-                                        q / (a_nm * 1e-7))
+        amplitude = amplitude_nm / a_nm
+        gapmin = gapmin_nm / a_nm
+        freqs = freqs_wn * (a_nm * 1e-7)
+
         if rp_norm is None:
             from NearFieldOptics import Materials as M
             rp_norm = M.Au.reflection_p
-        rp_norm_wrapped = lambda freq,q: rp_norm( freq / (a_nm * 1e-7),
-                                                 q / (a_nm * 1e-7))
-        amplitude = amplitude_nm / a_nm
-        freqs = freqs_wn * (a_nm * 1e-7)
+
         if freqs_wn_norm is None: freqs_wn_norm = np.mean(freqs_wn)
         freqs_norm = freqs_wn_norm * (a_nm * 1e-7)
 
-        signals = self.EradSpectrumDemodulated(freqs, rp=rp_wrapped,
+        # Wrap the provided rp functions so they can expand out dimensionless frequencies and wavevectors
+        # The supplied reflection function should take `frequency (wavenumbers), q (wavenumbers)`
+        signals = self.EradSpectrumDemodulated(freqs=freqs, rp=self.wrap_rp(rp,a_nm),
                                                gapmin=gapmin, amplitude=amplitude,
-                                               Ngaps=Ngaps, demod_order=demod_order)
-        signals_ref = self.EradSpectrumDemodulated(freqs=freqs_norm, rp=rp_norm_wrapped,
+                                               Ngaps=Ngaps, demod_order=demod_order,
+                                               record_rp_vals=True,**kwargs)
+        signals_ref = self.EradSpectrumDemodulated(freqs=freqs_norm, rp=self.wrap_rp(rp_norm,a_nm),
                                                    gapmin=gapmin, amplitude=amplitude,
-                                                   Ngaps=Ngaps, demod_order=demod_order)
+                                                   Ngaps=Ngaps, demod_order=demod_order,
+                                                   record_rp_vals=False,**kwargs)
         signals['Sn'] /= signals_ref['Sn']
         signals['Sn'].set_axes([None,freqs_wn],
                                axis_names=[None,'Frequency (cm$^{-1}$)'])
@@ -813,7 +991,155 @@ class EncodedEigenfields(object):
 
     def getBasisFourPotentialAtZ(self, *args,**kwargs):
 
-        return self.Probe.getFourPotentialAtZ(*args,**kwargs)
+        P = self.Spectroscopy.get_probe_at_coord(self._gap0)
+        return P.getFourPotentialAtZ(*args,**kwargs)
+
+    def SumOfMonopoles(self,Qs, Zs):
+
+        total = np.zeros(self.kappas.shape, dtype=complex) #This allocates a `holder` of correct size
+        for Q,Z in zip(Qs,Zs):
+            total += Q*np.exp(-self.kappas*Z)
+
+        # This is now a sum of monopole potentials, carrying the factor of q for radial integral or dz operator
+        return AWA(total,axes=[self.kappas],axis_names=[r'$kappa$']) #/ kappas * kappas
+
+    def fit_Phi0_monopoles(self, Nmode, kappa_max=2, Nkappas = 2e3,
+                           R2_target=.9, Nmonopoles_max=12,
+                           plot=True):
+
+        assert R2_target > 0 and Nmonopoles_max > 10
+        P = self.Phis0[Nmode-1]  # If we fit this, we are implicitly finding the sum of monopole potentials $\exp(-q*Z)/q$
+        P = AWA(P, axes=[self.kappas])
+        Pfunc = lambda kappas: P.interpolate_axis(kappas, axis=0, extrapolate=True, bounds_error=False)
+
+        import time
+        t0 = time.time()
+        Poles, Residues = numrec.ExponentialsFit_GPOF(Pfunc, xmax=kappa_max, N=Nkappas)
+        print('Elapsed time for GPOF fit: ', time.time() - t0)
+
+        Qs_all,Zs_all = Residues,Poles
+
+        # Determine now how many monopoles to retain to achieve target R2 value
+        R2=0; N=0
+        while R2 < R2_target:
+            N+=1
+            Qs = Qs_all[:N]
+            Zs = Zs_all[:N]
+            P_estim = self.SumOfMonopoles(Qs, Zs)
+            residual = np.sum(np.abs(P - P_estim) ** 2 * self.dkappas)\
+                                 / np.sum(np.abs(P) ** 2 * self.dkappas)
+            R2 = 1-residual
+
+            if N == Nmonopoles_max: break
+
+        print('Achieved R2=%1.2f by fitting %i monopoles.'%(R2,N))
+
+        if plot:
+            from matplotlib import pyplot as plt
+            plt.figure()
+
+            plt.semilogx(self.kappas,P.real,color='r',label='eigenfield %i'%Nmode)
+            plt.semilogx(self.kappas,P.imag,color='b')
+
+            plt.semilogx(self.kappas,P_estim.real,color='r',ls='--',label='fit (%i monopoles)'%N)
+            plt.semilogx(self.kappas,P_estim.imag,color='b',ls='--')
+
+            plt.legend(loc='best')
+            plt.title(r'$R^2 = %1.2f$'%R2)
+
+        return Qs,Zs
+
+    def getPhis0Monopoles(self,Nmodes=None,recompute=False,
+                            **kwargs):
+        """Iteratively use method `get_Phi0_fit` to obtain a multipolar fit to each eigenfield up to `N=Nmodes`."""
+
+        if recompute or not (hasattr(self,'_Phi0MonopoleParams') and len(self._Phi0MonopoleParams)):
+
+            if Nmodes is None: Nmodes = len(self.Phis0)
+
+            self._Phi0MonopoleParams = {}
+            for Nmode in np.arange(Nmodes)+1:
+                print('Performing multipolar fit on eigenfield %i...'%Nmode)
+                fit = self.fit_Phi0_monopoles( Nmode, **kwargs)
+                self._Phi0MonopoleParams[Nmode]=fit
+
+        return copy.copy(self._Phi0MonopoleParams)
+
+    @staticmethod
+    def get_2D_reflectivity_from_monopoles(sigma2D, eps_substrate, freq, monopoles1, monopoles2=None, numerical=False):
+
+        from scipy.special import expi,shichi
+
+        beta = (eps_substrate-1)/(eps_substrate+1)
+        kappa = (eps_substrate+1)/2
+        qp = 1j*freq/sigma2D # normally `qp = 1j*\omega/(2*pi*sigma2D) = 1j*(c*wavenumber)/sigma2D = 1j*(wavenumber*a)/(sigma2D/c) * 1/a`
+        # this way `freq` can be dimensionless wavenumber and `sigma2D` is dimensionless conductivity in units of speed of light
+        qp *= kappa #This is the ambient screening
+        dq = beta*qp #This is the substrate response
+
+        if monopoles2 is None: monopoles2 = monopoles1
+
+        def numerically_integrate(Z,dq,qp):
+
+            from scipy.integrate import quad
+            integrand = lambda q: np.exp(-2*q*Z)*(dq-q)/(qp-q)
+
+            return quad(integrand, 0, np.inf)[0] #second in tuple would be relative error
+
+        Result = 0
+        #Sum every integral from the binomial expansion $\int dq (dipole11(q) + dipole12(q)+..)*r_p(q)*(dipole21(q)+dipole22(q)+..)$,
+        # remembering that dipole parameters were fit including each a factor of `q`
+        for q1,Z1 in zip(*monopoles1):
+            for q2,Z2 in zip(*monopoles2):
+                Q = q1*q2
+
+                Z = (Z1+Z2)/2 # If `dipole1=dipole2`, this would be `2*Z`, hence division by 2
+
+                if numerical: result = numerically_integrate(Z,dq,qp)
+                else:
+                    # This expression is the result of $\int_0^\infty dq q^2 \exp(-2 Z) * r_p(q)$,
+                    #  with $r_p(q) = (dq-q) / (qp-q)$.
+
+                    arg = 2 * qp * Z
+                    exp_part = np.exp(-arg)
+                    expi_part = exp_part * expi(arg)
+                    if not np.isfinite(expi_part) or not np.isfinite(exp_part):
+                        expi_part = 1 / (2 * qp * Z)  # e^-x * expi(x) \approx 1/x
+                        exp_part = 0
+                        print('Problematic argument encountered!')
+                        print('qp,Z=',qp,Z)
+                        print('arg=',arg)
+
+                    result = 1 / (2 * Z) + (dq - qp) * expi_part
+                    if np.real(qp)>0:
+                        result += (dq-qp) * (-1j*np.pi) * exp_part
+
+                result *= Q
+                Result += result
+
+        # when `qp` is very large (no surface conductivity) and `eps_substrate` is large (beta->1),
+        #  `result` should be unity when summed over many dipoles
+        return Result
+
+    def get_2D_Rmat_from_monopoles(self,sigma2D,eps_substrate,freq,**kwargs):
+
+        MonopoleParams = self.getPhis0Monopoles(**kwargs) #A dictionary
+
+        Nmodes = len(MonopoleParams)
+        Rmat = np.zeros((Nmodes,)*2, dtype=complex)
+
+        for i in range(Nmodes):
+            monopoles_i = MonopoleParams[i+1] #keys to dictionary start from N=1
+
+            for j in range(Nmodes):
+                if j>0: continue
+                monopoles_j = MonopoleParams[j+1]
+
+                # Symmetric matrix
+                Rmat[i,j] = Rmat[j,i] = self.get_2D_reflectivity_from_monopoles(sigma2D, eps_substrate, freq,
+                                                                                monopoles1= monopoles_i, monopoles2= monopoles_j)
+
+        return Rmat
 
 #------- Tools for inversion
 
@@ -867,7 +1193,7 @@ class InvertibleEigenfields(object):
         stability and smoothness in approach curves...
         (although overall """
 
-        Brightnesses = GapSpec.get_brightnesses_AWA(Nmodes=Nmodes, recompute=False).T  # Put coordinate (gaps) axis first
+        Brightnesses = GapSpec.get_eigenbrightness_AWA(Nmodes=Nmodes, recompute=False).T  # Put coordinate (gaps) axis first
         self.Rs = Brightnesses**2 #@TODO: Might want to double check this
         self.Ps = GapSpec.get_eigenrhos_AWA(Nmodes=Nmodes, verbose=False,recompute=False).T  # Put coordinate (gaps) axis first
 
@@ -1224,4 +1550,3 @@ class InvertibleEigenfields(object):
         if not betas.ndim: betas = betas.tolist()
 
         return betas
-

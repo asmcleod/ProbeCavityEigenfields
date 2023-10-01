@@ -3,23 +3,21 @@
 import copy
 import time
 import numpy as np
+from collections import UserDict
 from numbers import Number
 from common.log import Logger
 from matplotlib import pyplot as plt
 
 import warnings
-import sys
 warnings.filterwarnings('ignore')
 
-from scipy.special import j0,j1,legendre
 from scipy.linalg import eig,eigh,solve
-from numba import njit
 from common import numerics
 num=numerics
-from common import numerical_recipes as numrec
 from common.baseclasses import ArrayWithAxes as AWA
 
 from . import RotationalMoM as RotMoM
+from .RotationalMoM import *
 
 class Timer(object):
 
@@ -36,116 +34,9 @@ class Timer(object):
 
         return msg
 
-def get_probe_radii(zs,L=1000,z0=0,a=1,taper_angle=20,geometry='cone',Rtop=0):
+#2023.05.25 -- Efields in this module are deprecated and moved to `RotationalMoM` module
+"""#--- Fields
 
-    #Establish location of tip and make tip coordinates
-    global Rs
-    Where_Tip=(zs>=z0)*(zs<=(z0+L))
-    zs_tip=zs-z0
-
-    Logger.write('Getting geometry for selection "%s"...'%geometry)
-    if geometry=='PtSi':
-
-        from NearFieldOptics.PolarizationModels import PtSiTipProfile
-        Rs=a*PtSiTipProfile((zs-z0)/float(a),L)
-
-    elif geometry=='sphere':
-        L=2*a
-        Rs=np.zeros(zs.shape)+\
-           a*np.sqrt(1-(zs_tip-L/2.)**2/(L/2.)**2)
-
-    elif geometry=='ellipsoid':
-        b=L/2.
-        R=np.sqrt(b*np.float(a)) #Maintains curvature of 1/a at tip
-        Rs=np.zeros(zs.shape)+\
-           R*np.sqrt(1-(zs_tip-b)**2/b**2)
-
-    elif geometry in ['cone','hyperboloid']:
-
-        if geometry=='hyperboloid':
-            assert taper_angle>0
-            tan=np.tan(np.deg2rad(taper_angle))
-            R=a/tan**2
-            Rs=tan*np.sqrt((zs_tip+R)**2-R**2)
-
-        if geometry=='cone':
-            ZShft_Bottom=a*(1-np.sin(np.deg2rad(taper_angle)))
-            RShft_Bottom=a*np.cos(np.deg2rad(taper_angle))
-
-            alpha=np.tan(np.deg2rad(taper_angle))
-
-            Rs=RShft_Bottom+(zs_tip-ZShft_Bottom)*alpha
-
-            Where_SphBottom=(zs_tip<=ZShft_Bottom)
-            Rs[Where_SphBottom]=np.sqrt(a**2-(a-zs_tip[Where_SphBottom])**2)
-            #Rs[np.isnan(Rs)+np.isinf(Rs)]=0
-
-        #Add rounded sphere profile to top of cone/hyperboloid
-        ZShft_Top=L-Rtop*(1+np.sin(np.deg2rad(taper_angle)))
-        Where_SphTop=(ZShft_Top<zs_tip)*(zs_tip<=L)
-        if Where_SphTop.any():
-
-            RShft_Top=Rs[Where_SphTop][0]
-            RSph_Top=RShft_Top-Rtop*np.cos(np.deg2rad(taper_angle))
-            ZSph_Top=L-Rtop
-            Rs[Where_SphTop]=RSph_Top+np.sqrt(Rtop**2-(ZSph_Top-zs_tip[Where_SphTop])**2)
-
-    else: Logger.raiseException('"%s" is an invalid geometry type!'%geometry,exception=ValueError)
-
-    #Make finite only where tip is present
-    Rs*=Where_Tip
-    Rs[np.isnan(Rs)+np.isinf(Rs)]=0
-    minR=1e-40
-    Rs[Rs<=minR]=minR #token small value
-
-    return Rs
-
-#--- Root-finding tools
-
-def companion_matrix(p):
-    """Assemble the companion matrix associated with a polynomial
-    whose coefficients are given by `poly`, in order of decreasing
-    degree.
-    
-    Currently unused, but might find a role in a custom polynomial
-    root-finder.
-    
-    References:
-    1) http://en.wikipedia.org/wiki/Companion_matrix
-    """
-    
-    A = np.diag(np.ones((len(p)-2,), np.complex128), -1)
-    A[0, :] = -p[1:] / p[0]
-
-    return np.matrix(A)
-
-def find_roots(p,scaling=10):
-    """Find roots of a polynomial with coefficients `p` by
-    computing eigenvalues of the associated companion matrix.
-    
-    Overflow can be avoided during the eigenvalue calculation
-    by preconditioning the companion matrix with a similarity
-    transformation defined by scaling factor `scaling` > 1.
-    This transformation will render the eigenvectors in a new
-    basis, but the eigenvalues will remain unchanged.
-    
-    Empirically, `scaling=10` appears to enable successful 
-    root-finding on polynomials up to degree 192."""
-    
-    from scipy.linalg import eigvals
-    
-    global M
-    scaling=np.float64(scaling)
-    M=companion_matrix(p); N=len(M)
-    D=np.matrix(np.diag(scaling**np.arange(N)))
-    Dinv=np.matrix(np.diag((1/scaling)**np.arange(N)))
-    Mstar=Dinv*M*D # Similarity transform will leave the eigenvalues unchanged
-    
-    print(np.abs(Mstar).max())
-    
-    return eigvals(Mstar)
-
-#--- Fields
 def EBesselBeamFF(angle=60, k = 2*np.pi*.003, z0=0):
     
     anglerad=np.deg2rad(angle)
@@ -189,20 +80,9 @@ def EBesselBeamNF(q,k=2*np.pi*.003):
         
         return kz*J1*Exp
     
-    return Er,Ez
+    return Er,Ez"""
 
 #--- Probe class helpder functions
-
-def qs_envelopeNF(freq,q):
-    
-    k=2*np.pi*freq; dq=.5*k
-    q0=2*k
-    env=np.tanh((q-q0)/dq)
-    env-=np.tanh((-q0)/dq)
-    env[env<0]=0
-    env/=env.max() #bring level up to 1
-    
-    return env
 
 def mirror_double_image(im, axis=0):
 
@@ -212,15 +92,15 @@ def mirror_double_image(im, axis=0):
 
     slices = [slice(None) for d in range(im.ndim)]
     slices[axis] = slice(None, None, -1)
-    new_im = np.concatenate((im[slices], im), axis=axis)
+    new_im = np.concatenate((im[tuple(slices)], im), axis=axis)
 
     return AWA(new_im, axes=new_axes, axis_names=im.axis_names)
 
 class Efield_generator(object):
     
-    def __init__(self,\
-                 Er_Mat,Ez_Mat,\
-                 Er_Mat_m,Ez_Mat_m,\
+    def __init__(self,
+                 Er_Mat,Ez_Mat,
+                 Er_Mat_m,Ez_Mat_m,
                  rs,zs):
         
         self.Er_Mat=np.matrix(Er_Mat)
@@ -252,18 +132,18 @@ class Efield_generator(object):
     
         return Er,Ez
     
-def demodulate(signal_AWA,demod_order=5,quadrature=numrec.GL,Nts=244):
+def demodulate(signal_AWA,demod_order=5,quadrature=numrec.GL,Nts=None):
     "Demodulate `signal_AWA` along its first axis."
-    
-    from numpy.polynomial.chebyshev import chebfit
+
     global signal_vs_z
     
     #--- Define domain `x \in [-1,1]` and fit to Chebyshev polynomials
     zs=signal_AWA.axes[0] #Assume we want to demodulate over entire range
     A=(zs.max()-zs.min())/2
-    if Nts is None: Nts=len(zs)
+    if Nts is None: Nts=len(zs)*4
+    Logger.write('Demodulating across A=%1.2G with Nt=%i...'%(A,Nts))
     ts,dts=numrec.GetQuadrature(N=Nts,xmin=-.5,xmax=0,quadrature=quadrature)
-    zs_sweep = zs.min() + A*(1+np.cos(2*np.pi*ts)) # high to low; if zs were CC quadrature, then these are the same z-values but reordered
+    zs_sweep = zs.min() + A*(1+np.cos(2*np.pi*ts)) # positions low to high; if zs were CC quadrature, then these are the same z-values but reordered
     signal_vs_t=signal_AWA.interpolate_axis(zs_sweep,bounds_error=False,extrapolate=True,axis=0,kind='quadratic')
 
     Sns=[]
@@ -287,21 +167,85 @@ def demodulate(signal_AWA,demod_order=5,quadrature=numrec.GL,Nts=244):
              axis_names=axis_names)
     
     return Sns
+
+class _ProbesCollection(UserDict):
+
+    def generate_name(self):
+
+        probe_names = list(self.data.keys())
+        k = len(probe_names)+1
+
+        probe_name=None
+        while probe_name is None:
+            test='probe_%i'%k
+            if test in probe_names: k+=1
+            else: probe_name=test
+
+        return probe_name
+
+    _overwrite = False
+
+    def overwrite(self, enable=None):
+
+        if enable is not None:
+            assert isinstance(enable,bool)
+            self._overwrite=enable
+
+        return self._overwrite
+
+    def __setitem__(self, probe_name, probe):
+
+        assert isinstance(probe_name,str)
+
+        # remove probe entry first if we are adding it again with a different name
+        keys_to_remove=[]
+        for key,val in self.items():
+            if val is probe: keys_to_remove.append(key)
+        for key in keys_to_remove: self.pop(key)
+
+        # Or Raise error if we already have such key
+        if probe_name in self.data:
+            if not self.overwrite():
+                raise ValueError('A probe named "%s" is already instantiated!  If you wish to overwrite this probe, '%probe_name+\
+                                 'remove it from the collection of probes by using the `del` command!')
+            else: Logger.write('Overwriting registered probe "%s"...'%probe_name)
+        else: Logger.write('Registering probe "%s"...'%probe_name)
+
+        self.data[probe_name] = probe
+
+ProbesCollection=_ProbesCollection()
+
+PC = ProbesCollection # A short alias
     
-#--- Probe class
+#--- Probe classes
 
 class Probe(object):
-    
-    defaults={'freq':30e-7/10e-4,\
-               'a':1,\
-              'gap':1,\
-              'L':19e-4/30e-7,\
-              'skin_depth':.05}
+
+    defaults = {'freq': 30e-7 / 10e-4,
+                     'a': 1,
+                     'gap': 1,
+                     'L': 19e-4 / 30e-7,
+                     'skin_depth': .05,
+                     'illum_angles': np.linspace(45, 90, 20),
+                     'excitation': EPlaneWaveFF}
     
     def __init__(self,zs=None,rs=None,
-                 Nnodes=244,L=None,quadrature=numrec.TS,\
+                 Nnodes=244,L=None,quadrature=numrec.GL,
                  a=None,taper_angle=20,geometry='hyperboloid',Rtop=0,\
-                 freq=None,gap=None,Nsubnodes=2,closed=False,**kwargs):
+                 freq=None,gap=None,Nsubnodes=2,closed=False,
+                 name=None,**kwargs):
+
+        self.set_name(name)
+        Logger.write('Generating probe "%s"...'%self.get_name())
+
+        ## Set up defaults
+        self.defaults = {'freq': 30e-7 / 10e-4,
+                            'a': 1,
+                            'gap': 1,
+                            'L': 19e-4 / 30e-7,
+                            'skin_depth': .05,
+                            'illum_angles': np.linspace(45, 90, 20),
+                             'excitation':EPlaneWaveFF}
         
         if a is None: a=self.defaults['a']
         if L is None: L=self.defaults['L']
@@ -309,21 +253,21 @@ class Probe(object):
         if zs is None:
             zs,wzs=numrec.GetQuadrature(Nnodes,xmin=0,xmax=L,quadrature=quadrature)
             zs -= zs.min()
-            zs += wzs[0]/2 #Bring the "zero" coordinate where it belongs before evaluating geometry
+            #zs += wzs[0]/2 #Bring the "zero" coordinate where it belongs before evaluating geometry
 
         if rs is not None: assert len(rs)==len(zs)
         else:
             if isinstance(geometry,str):
-                rs=get_probe_radii(zs,L=L,z0=0,a=a,\
-                                      taper_angle=taper_angle,\
-                                      geometry=geometry,Rtop=Rtop)
+                rs=get_BoR_radii(zs, L=L, z0=0, a=a, \
+                                 taper_angle=taper_angle, \
+                                 geometry=geometry, Rtop=Rtop)
             else:
                 assert hasattr(geometry,'__call__')
                 rs=geometry(zs,L=L,a=a,**kwargs)
 
-        self.Discretization = RotMoM.Discretization(rs,zs,closed=closed,\
-                                                    Nsubnodes=Nsubnodes,display=True)
-        self.D=self.Discretization
+        self.MethodOfMoments = RotMoM.BodyOfRevolution(rs, zs, closed=closed, \
+                                                       Nsubnodes=Nsubnodes, display=True)
+        self.MoM=self.MethodOfMoments
 
         self._eigenrhos=None
         self._eigencharges=None
@@ -338,8 +282,52 @@ class Probe(object):
         self.set_gap(gap)
 
         self.all_rp_vals=[]
+
+    def get_name(self): return copy.copy(self._name)
+
+    def set_name(self,name=None,overwrite=False):
+
+        # If no name is provided, keep existing one (which may itself be `None`)
+        if name is None: name = self.get_name()
+        # If still none, generate one
+        if name is None: name = ProbesCollection.generate_name()
+
+        # Re-register probe then change name
+        if overwrite: # Overwrite if called for (the default when using `__setstate__`)
+            overwrite_prev_set = ProbesCollection.overwrite()
+            ProbesCollection.overwrite(True)
+        ProbesCollection[name] = self
+        if overwrite:
+            ProbesCollection.overwrite(overwrite_prev_set)
+        self._name = name
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
+        newattrs = {'MethodOfMoments':'Discretization',
+                    'MoM':'Discretization',
+                    '_name':None}
+        for dest,src in newattrs.items():
+            if not hasattr(self, dest):
+                if isinstance(src,str): #interpret src as a key to write from
+                    if src in state:  setattr(self,dest, state[src])
+                else:
+                    setattr(self,dest,src)
+
+        # Register in Probes collection
+        self.set_name(overwrite=True)
+
         
     def get_a(self): return self._a
+
+    def reset_eigenproperties(self):
+
+        if np.any(self._eigenrhos): Logger.write('Resetting eigenproperties...')
+
+        self._eigenrhos=None
+        self._eigencharges=None
+        self._eigenexcitations=None
+        self._eigenbrightness=None
     
     def set_freq(self,freq=None):
 
@@ -350,16 +338,63 @@ class Probe(object):
                  
         self._freq=freq
         self._ZSelf=None #Re-set the self interaction
-    
+        self.reset_eigenproperties()
+
     def set_gap(self,gap=None):
         
         if gap is None: gap=self.defaults['gap']
+        try:
+            if gap == self.get_gap(): return # Do nothing
+        except AttributeError: pass
                  
         self._gap=gap
         self._ZMirror=None #Re-set the mirror interaction
-        self._eigenrhos=None
-        self._eigencharges=None
-        self._eigenexcitations=None
+        self.reset_eigenproperties()
+        
+    def get_freq(self): return copy.copy(self._freq)
+    
+    def get_k(self): return 2*np.pi*self.get_freq()
+    
+    def get_kappa_min(self):
+
+        kappa_L = 1/np.max(self.get_zs()) * self._kappa_min_factor
+
+        return kappa_L
+        # Disable k-dependence for now, it creates problems when comparing absolute scales of integrated results at different frequencies
+        # especially for rp values that are large for small values of kappa (near the light cone)
+        #kappa_k = 0 #k * self._kappa_min_factor
+
+        # return whichever of the two is larger (not to undersample the probe length!)
+        #return np.max( (kappa_L, kappa_k) )
+    
+    def get_gap(self): return copy.copy(self._gap)
+        
+    def get_zs(self): return copy.copy(self.MethodOfMoments.node_zs)
+
+    def _toAWA(self,charge,with_gap=False):
+        """Works even on input column vectors."""
+
+        charge=np.asarray(charge).squeeze()
+        zs=self.get_zs()
+        if with_gap: zs+=self.get_gap()
+
+        return AWA(charge,axes=[zs],axis_names=['z'])
+
+    def get_weights(self): return copy.copy(self.MethodOfMoments.node_dts)
+
+    def get_weights_matrix(self): return np.matrix(np.diag(self.get_weights()))
+        
+    def get_radii(self):
+
+        Rs = copy.copy(self.MethodOfMoments.node_Rs)
+        return self._toAWA(Rs)
+
+    def get_dRdz(self):
+
+        dR = np.gradient(self.get_radii())
+        dz = np.gradient(self.get_zs())
+
+        return dR/dz
 
     def plot_geometry(self,**kwargs):
 
@@ -380,55 +415,11 @@ class Probe(object):
 
         plt.xlabel('Radial coordinate')
         plt.ylabel('Z')
-        
-    def get_freq(self): return copy.copy(self._freq)
-    
-    def get_k(self): return 2*np.pi*self.get_freq()
-    
-    def get_kappa_min(self):
-
-        kappa_L = 1/np.max(self.get_zs()) * self._kappa_min_factor
-
-        return kappa_L
-        # Disable k-dependence for now, it creates problems when comparing absolute scales of integrated results at different frequencies
-        # especially for rp values that are large for small values of kappa (near the light cone)
-        #kappa_k = 0 #k * self._kappa_min_factor
-
-        # return whichever of the two is larger (not to undersample the probe length!)
-        #return np.max( (kappa_L, kappa_k) )
-    
-    def get_gap(self): return copy.copy(self._gap)
-        
-    def get_zs(self): return copy.copy(self.Discretization.node_zs)
-
-    def _toAWA(self,charge,with_gap=False):
-        """Works even on input column vectors."""
-
-        charge=np.asarray(charge).squeeze()
-        zs=self.get_zs()
-        if with_gap: zs+=self.get_gap()
-
-        return AWA(charge,axes=[zs],axis_names=['z'])
-
-    def get_weights(self): return copy.copy(self.Discretization.node_dts)
-
-    def get_weights_matrix(self): return np.matrix(np.diag(self.get_weights()))
-        
-    def get_radii(self):
-
-        Rs = copy.copy(self.Discretization.node_Rs)
-        return self._toAWA(Rs)
-
-    def get_dRdz(self):
-
-        dR = np.gradient(self.get_radii())
-        dz = np.gradient(self.get_zs())
-
-        return dR/dz
+        plt.title(self.get_name())
 
     #--- Momentum space propagators & reflectance
 
-    def getFourPotentialPropagators(self,k,farfield=False,\
+    def getFourPotentialPropagators(self,k=None,farfield=False,\
                                  kappa_min=None,kappa_max=np.inf,Nkappas=244,\
                                  qquadrature=numrec.GL,recompute=False):
         """
@@ -440,7 +431,12 @@ class Probe(object):
             try: return self._fourpotentialpropagators
             except AttributeError: pass
 
-        Logger.write('Computing field propagators...')
+        # Infer what the user wants if no k-value is provided
+        if k is None:
+            if farfield: k = self.get_k() #We clearly need to choose a finite k-value
+            else: k=0 #Completely quasi-static treatment of the fields (otherwise, it doesn't make much sense to have finite-k and to leave out far-field)
+
+        Logger.write('Computing field propagators at k=%1.2G...'%k)
 
         #--- Get geometric parameters
         zs=self.get_zs(); Zs=zs[np.newaxis,:]
@@ -448,9 +444,9 @@ class Probe(object):
         #dRdt = np.gradient(rs) / self.D.node_dts
         #Sin = dRdt[np.newaxis,:]
         #Cos = np.sqrt(1-Sin**2)
-        Sin=self.D.node_sin[np.newaxis,:]
-        Cos=self.D.node_cos[np.newaxis,:]
-        Dts=self.D.node_dts[np.newaxis,:]
+        Sin= self.MoM.node_sin[np.newaxis, :]
+        Cos= self.MoM.node_cos[np.newaxis, :]
+        Dts= self.MoM.node_dts[np.newaxis, :]
 
         #--- Prepare Quadrature Grid
         if kappa_min is None: kappa_min=self.get_kappa_min()
@@ -538,6 +534,9 @@ class Probe(object):
 
         return rpvals
 
+    # sometimes `rp` function "leak" the light cone, this lets us buffer it (we are anticipating imprecision in `rp`!)
+    light_cone_buffer = 2
+
     def getRpGapPropagator(self,rp_freq,kappas,dkappas,
                            gap,rp=None,recompute_rp=True,**kwargs):
 
@@ -545,7 +544,7 @@ class Probe(object):
         k = 2*np.pi*rp_freq
         self.rpk = k
         self.rpkappas = kappas
-        qs=np.sqrt(k**2+kappas**2).real.astype(float) #This will ensure we are always evaluating outside the light cone if `kappas>0`
+        qs=np.sqrt(k**2 * self.light_cone_buffer + kappas**2).real.astype(float) #This will ensure we are always evaluating outside the light cone if `kappas>0`
         rpvals=self.getRp(rp_freq,qs,rp=rp,recompute=recompute_rp,**kwargs)
 
         # if `kappas`, then `kzs=1j*kappas`
@@ -553,18 +552,19 @@ class Probe(object):
 
         return np.matrix(rpmat)
 
-    def getSommerfeldMirrorImpedance(self,k,gap=None,\
+    def getSommerfeldMirrorImpedance(self,k=None,gap=None,
                                        recompute_rp=True,rp=None,rp_freq=None,
                                        recompute_propagators=False,farfield=False,
-                                       qquadrature=numrec.GL,Nkappas=244,\
-                                       kappa_min=None,kappa_max=np.inf,\
+                                       qquadrature=numrec.GL,Nkappas=244,
+                                       kappa_min=None,kappa_max=np.inf,
                                        **kwargs):
 
         #--- Ingredients for sommerfeld integral
-        dP=self.getFourPotentialPropagators(k,recompute=recompute_propagators,\
+        dP=self.getFourPotentialPropagators(k,recompute=recompute_propagators,
                                              farfield=farfield,
-                                             qquadrature=qquadrature,Nkappas=Nkappas,\
-                                              kappa_min=kappa_min,kappa_max=kappa_max,**kwargs)
+                                             qquadrature=qquadrature,Nkappas=Nkappas,
+                                              kappa_min=kappa_min,kappa_max=kappa_max,
+                                            **kwargs)
         if gap is None: gap=self.get_gap()
         if rp_freq is None: rp_freq = self.get_freq()
         rpMat=self.getRpGapPropagator(rp_freq,kappas=dP['kappas'],dkappas=dP['dkappas'],\
@@ -590,7 +590,7 @@ class Probe(object):
         if recompute or self._ZSelf is None:
 
             if k is None: k=self.get_k()
-            self._ZSelf = self.Discretization.get_self_impedance(k,**kwargs)
+            self._ZSelf = self.MethodOfMoments.get_self_impedance(k, **kwargs)
             
         return copy.copy(self._ZSelf)
 
@@ -606,11 +606,11 @@ class Probe(object):
 
             if sommerfeld:
                 self._ZMirror = self.getSommerfeldMirrorImpedance(k, gap=gap, \
-                                                                       recompute_rp=True, rp=rp, \
-                                                                       recompute_propagators=True, \
-                                                                       **kwargs)
+                                                                   recompute_rp=True, rp=rp, \
+                                                                   recompute_propagators=True, \
+                                                                   **kwargs)
             else:
-                self._ZMirror = self.Discretization.get_mirror_impedance(k,gap=gap,**kwargs)
+                self._ZMirror = self.MethodOfMoments.get_mirror_impedance(k, gap=gap, **kwargs)
             
         return copy.copy(self._ZMirror)
 
@@ -644,14 +644,15 @@ class Probe(object):
         
         return complex(N2)
     
-    def get_field_overlap(self, Q, Er=None, Ez=None, V=None):
+    def get_field_overlap(self, Q, excitation, Vt=None, **kwargs):
+        """If Q is more than one charge vector, provide them as row vectors."""
 
-        if V is None: V = self.Discretization.get_excitation(Er,Ez)
+        if Vt is None: Vt,Vphi = self.MethodOfMoments.get_excitation(excitation,**kwargs)
         # otherwise assume V is a vector
 
         if not isinstance(Q, np.matrix): Q=np.matrix(Q).T
         
-        overlap = Q.T @ V #V carries the annular weights
+        overlap = Q.T @ Vt #V carries the annular weights
         
         #try to collapse to single number
         try: return complex(overlap)
@@ -660,7 +661,7 @@ class Probe(object):
     def get_charge_density(self,Q):
 
         Rs = self.get_radii()
-        dts = self.Discretization.node_dts
+        dts = self.MethodOfMoments.node_dts
         sigma = np.gradient(Q)/dts / (2*np.pi*Rs) #This formula uses Q as the accumulated charge at lozation z
 
         return self._toAWA(sigma)
@@ -692,7 +693,10 @@ class Probe(object):
                             condition_ZM=True,\
                             ZMthresh=0,\
                             ZSthresh=0,\
+                            basis = None,
                            plot=True):
+
+        self.reset_eigenproperties()
 
         ZS = self.get_self_impedance(recompute=recompute_impedance)
         ZM = self.get_mirror_impedance(recompute=recompute_impedance)
@@ -711,10 +715,13 @@ class Probe(object):
             va = va[:, where_good]
             ZS = ZS.real + 1j * va @ np.diag(-ea) @ va.T
 
+        #--- Default is a projective calculation, which will default to full-rank
+        V = np.eye(len(ZM)); a=None; b=None
+
         # --- Conditioning of ZM
         if condition_ZM:
             #ZM = -numrec.nearestPD(-ZM)
-            eb, vb = eigh( -ZM.real ) #This operator should be positive definite
+            eb, Vb = eigh( -ZM.real ) #This operator should be positive definite
 
             if plot:
                 plt.figure()
@@ -727,7 +734,11 @@ class Probe(object):
             #eb[~where_ok] = eb[where_ok].min()
             #vb = np.eye(len(ZM))
             eb = eb[where_ok]
-            vb = vb[:, where_ok]
+            Vb = Vb[:, where_ok]
+
+            b = np.diag(eb)
+            ZM = Vb @ -b @ Vb.T #Calculate the explicit mirror impedance because we'll at the very least store it away
+            self._ZMirror = ZM # We have modified, so now store away; Don't modify self impedance, we need to keep one of them full rank
 
             # so now, PhiM_cs = vb @ -eb @ vb.T; we use P=vb @ vb.T projector
             # and projected we have: PhiS_cs = vb @ vb.T @ PhiS_cs @ vb @ vb.T
@@ -736,29 +747,32 @@ class Probe(object):
             # PhiS = vb.T @ PhiS_cs @ vb
             # These are now in the basis of (csb = cs @ vb)
             # plt.matshow((csb.T @ W @ csb).real)
-            b = np.diag(eb)
+            V = Vb # This will be our orthogonal basis for generalized eigenvalue problem
 
-        else:
-            vb = np.eye(len(ZM))
-            b = -ZM
+        if np.any(basis):
+            basis = np.array(basis)
+            assert basis.ndim == 2
+            # Verify basis is orthogonal, or else we'll be in trouble
+            from numpy.linalg import qr
+            Q, R = qr(basis.T) # take column vectors of basis as target for orthogonalization
+            tol = 1e-9
+            indep = np.abs(np.diag(R)) > tol
+            V = Q[:, indep]  # Should now be (a portion of) orthonormal matrix
+            print('Basis has length %i'%V.shape[1])
+            b = None # assert we have to recompute `b` now
 
-        a = vb.T @ ZS @ vb
+        #--- Prepare matrices for generalized eigenvalue problem
+        if a is None:  a = V.T @ ZS @ V
+        if b is None:  b = V.T @ -ZM @ V
 
-        #-- Project and store modified operators
-        # Notably, we are introducing a null space, so it may profit to use operators that need no conditioning
-        cs = np.eye(len(ZS))
-        csb = cs @ vb
-        Pb = csb @ csb.T
-        ZM = Pb.T @ ZM @ Pb
-        self._ZMirror = ZM  #Don't modify self impedance, we need to keep one of them full rank
-
-        rhos, Qvecs = eig(a=a, b=b)
+        rhos, c = eig(a=a, b=b)  # `c` will have column vectors of length `Nmodes`
+        Qvecs = V @ c
 
         #-- Filtering
         rhothresh = 1e-2
         where_ok = (np.abs(rhos) > rhothresh) * np.isfinite(rhos)
         rhos = rhos[where_ok]
-        Qvecs = (csb @ Qvecs)[:,where_ok] #project back from restricted basis
+        Qvecs = Qvecs[:,where_ok] #project back from restricted basis
 
         #--- Normalization
         # Make sure to normalize w.r.t. conditioned operator, NOT original one
@@ -808,7 +822,8 @@ class Probe(object):
         plt.gca().set_yscale('symlog',linthresh=1e-1)
         plt.legend()
         plt.axhline(0)
-        plt.title('Min. eigenvalue: %1.2E+%1.2Ej'%(rhos[0].real,rhos[0].imag))
+        plt.title(self.get_name())
+        plt.xlabel('Min. eigenvalue: %1.2E+%1.2Ej'%(rhos[0].real,rhos[0].imag))
     
     def get_eigencharge(self,eigenindex,as_vector=False):
         """Return an eigencurrent associated with `eigenindex`, optionally
@@ -869,80 +884,91 @@ class Probe(object):
 
         return AWA(js, adopt_axes_from=Qs)
     
-    def get_eigenexcitations(self,Er=None,Ez=None,V=None,\
+    def get_eigenexcitations(self,Exc=None,Vt=None,\
                              recompute=False):
         
         if recompute or self._eigenexcitations is None:
             
-            Vns=[self.get_field_overlap(Q,Er=Er,Ez=Ez,V=V) \
+            Vns=[self.get_field_overlap(Q, Exc, Vt=Vt)
                  for Q in np.array(self.get_eigencharges())]
                 
             self._eigenexcitations=np.array(Vns)
             
         return self._eigenexcitations
 
-    def get_brightness(self,Q,k=None,angles=np.linspace(45,90,20),\
-                        illumination=EBesselBeamFF,average=True):
+    def get_brightness(self, Q, k=None, illum_angles=None, **kwargs):
 
         if k is None: k =self.get_k()
+        if illum_angles is None: illum_angles = self.defaults['illum_angles']
 
         Rns = []
-        if not hasattr(angles, '__len__'): angles = [angles]
-        for angle in angles:
-            Er, Ez = illumination(angle=angle, k=k)
-            Rn = self.get_field_overlap(Q, Er=Er, Ez=Ez)
+        if not hasattr(illum_angles, '__len__'): illum_angles = [illum_angles]
+        for angle in illum_angles:
+            Exc = self.defaults['excitation'](angle=angle, k=k)
+            Rn = self.get_field_overlap(Q, Exc, **kwargs)
             Rns.append(Rn)
 
-        Rns = AWA(Rns, axes=[angles], \
-                  axis_names=['Angle (deg.)'])
+        axes=[illum_angles]
+        axis_names=['Angle (deg.)']
+        if hasattr(Rn,'__len__'): #In case we received column vectorS for charge
+            axes+=[None]
+            axis_names += [None]
 
-        if average:
+        Rns = AWA(Rns, axes=axes,
+                  axis_names=axis_names)
+
+        #2023.05.23 - Remove averaging altogether; it only adds complexity- we will average at runtime
+        """if average:
             # 2023.05.21 - Sin factor was removed, because focusing optics should equally collimate entire collection range
             #if Rns.ndim==2: angles=angles[:,np.newaxis] #just so we broadcast over a "hidden" axis
             #Rns = np.mean(np.sin(np.deg2rad(angles)) * Rns, axis=0)
-            Rns = np.mean(Rns, axis=0)
+            Rns = np.mean(Rns, axis=0)"""
 
         return Rns
     
-    def get_eigenbrightness(self, k=None, angles=np.linspace(45, 90, 20), \
-                            illumination=EBesselBeamFF, average=True, \
-                            Nmodes=20,
-                            recompute=False):
+    def get_eigenbrightness(self, k=None, illum_angles=None,
+                            Nmodes=20,recompute=False,
+                            **kwargs):
         """This is the same as `get_eigenexcitations` except brightness is averaged over illumination angles."""
 
         if k is None: k =self.get_k()
+        if illum_angles is None: illum_angles = self.defaults['illum_angles']
         
         if not recompute:
-            try: return self._eigenbrightness
+            try:
+                Bs=self._eigenbrightness
+                if Bs.shape[1]<Nmodes: raise AttributeError # We have reason to compute more modes
+                return Bs
             except AttributeError: pass
-        print('Computing eigenbrightness...')
-        
-        Rns=[]
-        if not hasattr(angles,'__len__'): angles=[angles]
-        for angle in angles:
+        Logger.write('Computing eigenbrightness at k=%1.2f...'%k)
+
+        Qs = np.array(self.get_eigencharges())[:Nmodes]
+        Bs=[]
+        if not hasattr(illum_angles, '__len__'): illum_angles=[illum_angles]
+        for angle in illum_angles:
             
-            Er,Ez=illumination(angle=angle,k=k)
-            Rn=[self.get_field_overlap(Q,Er=Er,Ez=Ez) \
-                 for Q in np.array(self.get_eigencharges())[:Nmodes]]
-            Rns.append(Rn)
+            Exc=self.defaults['excitation'](angle=angle, k=k)
+            Rn=self.get_field_overlap(Qs,Exc,**kwargs) #Vectorized over all charge vectors
+            Bs.append(Rn)
             
-        Rns=AWA(Rns,axes=[angles,None],\
+        Bs=AWA(Bs, axes=[illum_angles, None],
                 axis_names=['Angle (deg.)','eigenindex'])
-        
-        if average:
+
+        #2023.05.23 - Remove averaging altogether; it only adds complexity- we will average at runtime
+        """if average:
             # 2023.05.21 - Sin factor was removed, because focusing optics should equally collimate entire collection range
             #Rns=np.mean(np.sin(np.deg2rad(angles[:,np.newaxis])) * Rns, axis=0)
-            Rns=np.mean(Rns, axis=0)
+            Rns=np.mean(Rns, axis=0)"""
             
-        self._eigenbrightness=Rns
+        self._eigenbrightness=Bs
         
         return self._eigenbrightness
 
     get_eigenreceptivity = get_eigenbrightness #a legacy alias
     
-    def get_eigenamplitudes(self,Er=None,Ez=None,V=None,rho=0):
+    def get_eigenamplitudes(self,Exc=None,Vt=None,rho=0):
         
-        Vns=self.get_eigenexcitations(Er=Er,Ez=Ez,V=V,\
+        Vns=self.get_eigenexcitations(Exc=Exc,Vt=Vt,\
                                       recompute=True)
         
         amps=[]
@@ -954,17 +980,17 @@ class Probe(object):
 
     #--- Charge solutions
 
-    def solve_induced_charge_direct(self,Er=None,Ez=None,V=None,\
+    def solve_induced_charge_direct(self,excitation=None,Vt=None,\
                                      rho=0,\
                                      as_vector=False,\
                                      **kwargs):
 
-        if V is None: V = self.Discretization.get_excitation(Er=Er,Ez=Ez)
+        if Vt is None: Vt,Vphi = self.MethodOfMoments.get_excitation(excitation)
 
         Z = self.get_impedance_matrix(rho=rho,**kwargs)
 
         #--- Solve linear system
-        Q=solve(Z, -V)
+        Q=solve(Z, -Vt)
         Q=np.matrix(Q) #somehow matrix type is not default output of `solve`..
 
         if as_vector: return Q
@@ -973,19 +999,19 @@ class Probe(object):
 
         return Q
     
-    def solve_induced_charge_eigen(self,Er=None,Ez=None,\
-                                     V=None,rho=0,\
+    def solve_induced_charge_eigen(self,excitation=None,\
+                                     Vt=None,rho=0,\
                                      Nmodes=20,Veff=True):
 
         if Veff:
-            Q0 = self.solve_induced_charge_direct(Er=Er, Ez=Ez, V=V, rho=0)
+            Q0 = self.solve_induced_charge_direct(excitation, Vt=Vt, rho=0)
             Zmirror = self.get_mirror_impedance()
-            V = np.array(Zmirror @ np.matrix(Q0).T).squeeze()
+            Vt = np.array(Zmirror @ np.matrix(Q0).T).squeeze()
         else:
-            if V is None: V=self.Discretization.get_excitation(Er,Ez)
+            if Vt is None: Vt,Vphi = self.MethodOfMoments.get_excitation(excitation)
             Q0=0
 
-        self.eigenamplitudes=self.get_eigenamplitudes(V=V,rho=rho)[:Nmodes]
+        self.eigenamplitudes=self.get_eigenamplitudes(Vt=Vt,rho=rho)[:Nmodes]
             
         Qs=[self.get_eigencharge(n) \
                  for n in range(len(self.eigenamplitudes))]
@@ -1008,11 +1034,11 @@ class Probe(object):
         #--- Obtain propagators
         gap=self.get_gap()
         assert z<gap
+        if k is None: k = self.get_k()
         dP = self.getFourPotentialPropagators(farfield=farfield,k=k,
                                          kappa_min=kappa_min,kappa_max=kappa_max,Nkappas=Nkappas,
                                          qquadrature=qquadrature,recompute=True)
         kappas = dP['kappas']; dkappas = dP['dkappas']
-        if k is None: k = self.get_k()
         qs=np.sqrt(k**2+kappas**2).real
         Pgap = np.matrix(np.diag(np.exp((z-gap)*kappas)))
         
@@ -1042,25 +1068,21 @@ class Probe(object):
         
         return Phi,Ar,Az,Ez
     
-    def getRsampleMatrix(self,freq,gap,Nmodes=20,\
-                   recompute_rp=True,rp=None,recompute_propagators=False,\
-                    farfield=False,
-                   k=None,kappa_min=None,kappa_max=np.inf,qquadrature=numrec.GL,Nkappas=244,\
-                   **kwargs):
+    def getRsampleMatrix(self,freq,gap,Nmodes=20,
+                           recompute_rp=True,rp=None,recompute_propagators=False,\
+                            farfield=False,
+                           k=None,kappa_min=None,kappa_max=np.inf,qquadrature=numrec.GL,Nkappas=244,\
+                           **kwargs):
 
-        # If a k-value for field evaluation is not specified, inherit from frequency and set the probe to that state
-        if k is None:
-            self.set_freq(freq)
-            k=2*np.pi*freq
-        Nmodes=np.min((self.get_Nmodes(),\
+        Nmodes=np.min((self.get_Nmodes(),
                        Nmodes))
 
-        Zmirror = self.getSommerfeldMirrorImpedance(gap=gap, rp_freq=freq, \
-                                                    recompute_rp=recompute_rp, rp=rp,\
-                                                    recompute_propagators=recompute_propagators, \
+        Zmirror = self.getSommerfeldMirrorImpedance(gap=gap, rp_freq=freq,
+                                                    recompute_rp=recompute_rp, rp=rp,
+                                                    recompute_propagators=recompute_propagators,
                                                     farfield=farfield,
-                                                    qquadrature=qquadrature, Nkappas=Nkappas, \
-                                                    k=k,kappa_min=kappa_min, kappa_max=kappa_max, \
+                                                    qquadrature=qquadrature, Nkappas=Nkappas,
+                                                    k=k,kappa_min=kappa_min, kappa_max=kappa_max,
                                                     **kwargs)
         
         Cs = self.get_eigencharges(as_vector=True)[:,:Nmodes]
@@ -1070,15 +1092,14 @@ class Probe(object):
             
         return RSampMat
     
-    def EradVsGap(self, freq, zmin=.1, zmax=4, \
-                  Nzs=20, zquadrature=numrec.CC, \
-                  Nmodes=20, illum_angles=np.linspace(10,80,20), \
+    def EradVsGap(self, freq, gapmin=.1, gapmax=4, \
+                  Ngaps=20, zquadrature=numrec.CC, \
+                  Nmodes=20, illum_angles=None, \
                   farfield=False,
-                  rp=None, recompute_rp=True, \
-                  recompute_propagators=True, \
-                  recompute_brightness=True, \
-                  subtract_background=True, \
-                  illumination=EBesselBeamFF, \
+                  rp=None, recompute_rp=True,
+                  recompute_propagators=True,
+                  recompute_brightness=True,
+                  subtract_background=True,
                   **kwargs):
         
         #--- Get initial mode amplitudes
@@ -1087,19 +1108,20 @@ class Probe(object):
         RhoMat=np.matrix(np.diag(self.get_eigenrhos()[:Nmodes]))
         
         #--- Retrieve receptivity of eigenmodes
-        # Recompute only if instructed
-        Vn=self.get_eigenbrightness(k=2*np.pi*freq,angles=illum_angles,average=True,\
-                                     illumination=illumination,\
-                                     recompute=recompute_brightness)
+        # Recompute only if instructed; this whole bit could be removed
+        if recompute_brightness: k=2*np.pi*freq #If we're recomputing, it's because we want brightness at `freq` (in this case, `ZSelf` should also be recomputed in principle..)
+        else: k=self.get_k()
+        Vn=self.get_eigenbrightness(k=k, illum_angles=illum_angles,
+                                    recompute=recompute_brightness,Nmodes=Nmodes)
         #If we have an angle axis, average it (axis=0)
         if Vn.ndim==2: Vn = np.mean(Vn,axis=0)
         Vn = Vn[:Nmodes]
         Vn=np.matrix(Vn).T
             
-        gaps,dgaps=numrec.GetQuadrature(xmin=zmin,
-                                          xmax=zmax,\
-                                           N=Nzs,\
-                                           quadrature=zquadrature)
+        gaps,dgaps=numrec.GetQuadrature(xmin=gapmin,
+                                        xmax=gapmax, \
+                                        N=Ngaps, \
+                                        quadrature=zquadrature)
         
         Erads=[]
         eigenamplitudes=[]
@@ -1158,8 +1180,8 @@ class Probe(object):
         for freq in freqs:
             if probe_spectroscopy is not None:
                 probe_spectroscopy.set_eigenset(self,freq,update_charges=update_charges)
-            dErad=self.EradVsGap(freq, zmin=gapmin, zmax=gapmax,
-                                 Nzs=Ngaps, zquadrature=zquadrature,
+            dErad=self.EradVsGap(freq, gapmin=gapmin, gapmax=gapmax,
+                                 Ngaps=Ngaps, zquadrature=zquadrature,
                                  Nmodes=Nmodes, illum_angles=illum_angles,
                                  rp=rp, recompute_rp=True,
                                  farfield=farfield,
@@ -1182,13 +1204,26 @@ class Probe(object):
         
         #--- Demodulate with chebyshev polynomials
         if demod_order:
-            Logger.write('Demodulating...')
             Sn=demodulate(EradsVsFreq,demod_order=demod_order)
             result['Sn']=Sn
         
         Logger.write('\t'+T())
         
         return result
+
+    @staticmethod
+    def wrap_rp(rp,a_nm):
+
+        def wrapped_rp(freq_norm,q_norm):
+
+            freq_wn = freq_norm / (a_nm * 1e-7)
+            q_wn = q_norm / (a_nm * 1e-7)
+            # print('min k (wn): %1.3f'%np.min(2*np.pi*freq_wn)) #Debug messages to ensure we are outside the light cone
+            # print('min q (wn): %1.3f'%np.min(q_wn))
+
+            return rp(freq_wn,q_wn)
+
+        return wrapped_rp
 
     def getNormalizedSignal(self,freqs_wn,rp,
                             a_nm=30,amplitude_nm=50,demod_order=5,
@@ -1199,28 +1234,25 @@ class Probe(object):
 
         # Wrap the provided rp functions so they can expand out dimensionless frequencies and wavevectors
         # The supplied reflection function should take `frequency (wavenumbers), q (wavenumbers)`
-        if rp_norm is None:
-            from NearFieldOptics import Materials as M
-            rp_norm = M.Au.reflection_p
-        def rp_norm_wrapped(freq,q): return rp_norm( freq / (a_nm * 1e-7),
-                                                     q / (a_nm * 1e-7))
-        def rp_wrapped(freq,q): return rp( freq / (a_nm * 1e-7),
-                                            q / (a_nm * 1e-7))
 
         amplitude = amplitude_nm / a_nm
         freqs = freqs_wn * (a_nm * 1e-7)
         if freqs_wn_norm is None: freqs_wn_norm = np.mean(freqs_wn)
         freqs_norm = freqs_wn_norm * (a_nm * 1e-7)
 
-        signals_ref = self.EradSpectrumDemodulated(freqs=freqs_norm, rp=rp_norm_wrapped,
-                                                   gapmin=gapmin, amplitude=amplitude,
-                                                   Ngaps=Ngaps, demod_order=demod_order,
-                                                   **kwargs)
-        signals = self.EradSpectrumDemodulated(freqs, rp=rp_wrapped,
+        signals = self.EradSpectrumDemodulated(freqs, rp=self.wrap_rp(rp,a_nm),
                                                gapmin=gapmin, amplitude=amplitude,
                                                Ngaps=Ngaps, demod_order=demod_order,
                                                **kwargs)
-        signals['Sn'] /= signals_ref['Sn']
+
+        # Normalize only if normalization is requested
+        if rp_norm is not None:
+            signals_ref = self.EradSpectrumDemodulated(freqs=freqs_norm, rp=self.wrap_rp(rp_norm,a_nm),
+                                                       gapmin=gapmin, amplitude=amplitude,
+                                                       Ngaps=Ngaps, demod_order=demod_order,
+                                                       **kwargs)
+            signals['Sn'] /= signals_ref['Sn']
+
         signals['Sn'].set_axes([None,freqs_wn],
                                axis_names=[None,'Frequency (cm$^{-1}$)'])
         signals['Erad'].set_axes([None,freqs_wn],
@@ -1228,31 +1260,29 @@ class Probe(object):
 
         return signals
     
-    def EradApproachCurveDemodulated(self,freq,zs=np.logspace(-1,1,50),amplitude=2,\
-                                    Nzs_demod=12,zquadrature=numrec.CC,\
-                                    Nmodes=20,illum_angles=np.linspace(10,80,20),\
-                                    rp=None,recompute_rp=True,demod_order=4,\
-                                    recompute_propagators=True,
-                                    recompute_brightness=True,
-                                    **kwargs):
+    def EradApproachCurveDemodulated(self, freq, gaps=np.logspace(-1, 1, 50), amplitude=2,
+                                     Nzs_demod=12, zquadrature=numrec.CC,
+                                     Nmodes=20, illum_angles=None,
+                                     rp=None, recompute_rp=True, demod_order=4,
+                                     recompute_propagators=True,
+                                     recompute_brightness=True,
+                                     **kwargs):
         
         Logger.write('Building approach curve...')
         T=Timer()
         
         Erads=[]
-        
-        for z0 in zs:
-            Logger.write('\tWorking on z=%1.2f...'%z0)
-            zmin=z0
-            zmax=z0+2*amplitude
-            dErad=self.EradVsGap(freq, zmin=zmin, zmax=zmax, \
-                                 Nzs=Nzs_demod, zquadrature=zquadrature, \
-                                 Nmodes=Nmodes, illum_angles=illum_angles, \
-                                 rp=rp, recompute_rp=recompute_rp, \
-                                 recompute_propagators=recompute_propagators, \
-                                 recompute_brightness=recompute_brightness, \
+        for gap0 in gaps:
+            Logger.write('\tWorking on z=%1.2f...'%gap0)
+            dErad=self.EradVsGap(freq, gapmin=gap0, gapmax=gap0+2*amplitude,
+                                 Ngaps=Nzs_demod, zquadrature=zquadrature,
+                                 Nmodes=Nmodes, illum_angles=illum_angles,
+                                 rp=rp, recompute_rp=recompute_rp,
+                                 recompute_propagators=recompute_propagators,
+                                 recompute_brightness=recompute_brightness,
                                  **kwargs)
             Erad=dErad['Erad']
+            gaps_sub = Erad.axes[0] - gap0
             
             #These definitely won't change for the remainder of the calculation
             recompute_propagators=False
@@ -1262,11 +1292,12 @@ class Probe(object):
             Erads.append(Erad) #append the trace of signals from [z0,z0+2*amplitude]
         
         #--- Demodulate traces for all z0 at once
-        Erads=AWA(Erads,axes=[zs,Erads[0].axes[0]],\
+        Erads=AWA(Erads, axes=[gaps, Erads[0].axes[0]],
                   axis_names=['z0','gap']).T #For demodulation, we need `gap` as first axis
-        Sns=demodulate(Erads,demod_order=demod_order)
-        
-        result = dict(Erad=Erads[0],Sn=Sns)
+        Sns_all = demodulate(Erads,demod_order=demod_order) # demodulation order will be first axis, gap0's second
+        Erad = Erads.cslice[0] #This evaluated Erad at `gap=0`, for all z0s
+
+        result = dict(Erad=Erad,Sn=Sns_all)
         
         Logger.write('\t'+T())
         
@@ -1349,7 +1380,8 @@ class Probe(object):
                    axis_names=['r','z'])
 
     def computeEfieldImages(self, Q, rs_out, zs_out, rho=1,\
-                            rp=None, freq=None, Nqs_factor=4,display=True,mirror_double_images=True):
+                            rp=None, freq=None, Nqs_factor=4,
+                            display=True,mirror_double_images=True):
         """ Real-space map of electric field in quasistatic limit."""
 
         if mirror_double_images: rs_out=rs_out[rs_out>0]
@@ -1358,9 +1390,9 @@ class Probe(object):
         if rp is not None:
             PhiM = self.computePhiImageSommerfeld(Q, rs_out, zs_out, \
                                                  rp, freq=freq, Nqs_factor=Nqs_factor,display=display)
-        else: PhiM = self.computePhiImage(Q, rs_out, zs_out, mirror=True)
+        else: PhiM = rho * self.computePhiImage(Q, rs_out, zs_out, mirror=True)
 
-        PhiTot = PhiS + rho * PhiM
+        PhiTot = PhiS + PhiM
 
         Er, Ez = np.gradient(-PhiTot)
         Er *= 1 / np.gradient(rs_out)[:, np.newaxis]
