@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 
+import os
 import copy
+import pickle
 import time
 import numpy as np
 from collections import UserDict
@@ -132,7 +134,7 @@ class Efield_generator(object):
     
         return Er,Ez
     
-def demodulate(signal_AWA,demod_order=5,quadrature=numrec.GL,Nts=None):
+def demodulate(signal_AWA,demod_order=5,quadrature=numrec.GL,Nts=None,verbose=False):
     "Demodulate `signal_AWA` along its first axis."
 
     global signal_vs_z
@@ -141,7 +143,7 @@ def demodulate(signal_AWA,demod_order=5,quadrature=numrec.GL,Nts=None):
     zs=signal_AWA.axes[0] #Assume we want to demodulate over entire range
     A=(zs.max()-zs.min())/2
     if Nts is None: Nts=len(zs)*4
-    Logger.write('Demodulating across A=%1.2G with Nt=%i...'%(A,Nts))
+    if verbose: Logger.write('Demodulating across A=%1.2G with Nt=%i...'%(A,Nts))
     ts,dts=numrec.GetQuadrature(N=Nts,xmin=-.5,xmax=0,quadrature=quadrature)
     zs_sweep = zs.min() + A*(1+np.cos(2*np.pi*ts)) # positions low to high; if zs were CC quadrature, then these are the same z-values but reordered
     signal_vs_t=signal_AWA.interpolate_axis(zs_sweep,bounds_error=False,extrapolate=True,axis=0,kind='quadratic')
@@ -216,6 +218,66 @@ class _ProbesCollection(UserDict):
 ProbesCollection=_ProbesCollection()
 
 PC = ProbesCollection # A short alias
+##############################
+# --- Save / load facilities.
+# Any object can utilize these, who defines attribute `filename_template` and method `get_probe()`
+#############################
+
+probe_models_dir = os.path.join(os.path.dirname(__file__),'Probe models')
+if not os.path.exists(probe_models_dir): os.mkdir(probe_models_dir)
+
+def get_filepath(probe, cls): #Get the filepath for object of `cls` associated with `probe`
+
+    if  isinstance(probe,Probe): probe_name = probe.get_name()
+    else:
+        assert isinstance(probe,str)
+        probe_name = probe
+    filename = cls.filename_template % probe_name
+    filepath = os.path.join(probe_models_dir, filename)
+
+    return filepath
+
+def save(obj, overwrite=False):
+
+    if hasattr(obj,'get_probe'): probe = obj.get_probe()
+    else:
+        assert isinstance(obj,Probe)
+        probe=obj
+
+    filepath = get_filepath(probe, obj)
+
+    if os.path.exists(filepath) and not overwrite:
+        raise OSError('File "%s" exists!  Set `overwrite=True` to do so.' % filepath)
+
+    import pickle
+    with open(filepath, 'wb') as f:
+        pickle.dump(obj, f)
+        print('Successfully saved to file "%s"!' % filepath)
+
+def load(probe, cls, overwrite_probe=False): #Load the object of `cls` associated with `probe`
+
+    filepath = get_filepath(probe,cls)
+
+    prev_val = ProbesCollection._overwrite
+    if overwrite_probe: #(temporarily) set to overwrite if commanded
+        ProbesCollection.overwrite(True)
+
+    try_path = os.path.join(probe_models_dir,filepath)
+    if not os.path.exists(filepath) and os.path.exists(try_path):
+        filepath = try_path
+
+    try:
+        with open(filepath,'rb') as f:
+            obj = pickle.load(f)
+            print('Successfully loaded from file "%s"!'%filepath)
+        ProbesCollection.overwrite(prev_val)
+    except ValueError as e:
+        ProbesCollection.overwrite(prev_val) # Whether error or not, make sure previous overwrite status is restored
+        msg = e.args[0]
+        msg += '  You may avert this error by passing keyword `overwrite=True` to `load`!'
+        raise ValueError(msg)
+
+    return obj
     
 #--- Probe classes
 
@@ -225,7 +287,6 @@ class Probe(object):
                      'a': 1,
                      'gap': 1,
                      'L': 19e-4 / 30e-7,
-                     'skin_depth': .05,
                      'illum_angles': np.linspace(45, 90, 20),
                      'excitation': EPlaneWaveFF}
     
@@ -243,7 +304,6 @@ class Probe(object):
                             'a': 1,
                             'gap': 1,
                             'L': 19e-4 / 30e-7,
-                            'skin_depth': .05,
                             'illum_angles': np.linspace(45, 90, 20),
                              'excitation':EPlaneWaveFF}
         
@@ -283,7 +343,9 @@ class Probe(object):
 
         self.all_rp_vals=[]
 
-    def get_name(self): return copy.copy(self._name)
+    def get_name(self):
+        try: return copy.copy(self._name)
+        except: return None
 
     def set_name(self,name=None,overwrite=False):
 
@@ -292,16 +354,18 @@ class Probe(object):
         # If still none, generate one
         if name is None: name = ProbesCollection.generate_name()
 
-        # Re-register probe then change name
-        if overwrite: # Overwrite if called for (the default when using `__setstate__`)
+        # Re-register probe if overwriting, or if not existent in collection
+        if name not in ProbesCollection: ProbesCollection[name] = self
+        elif overwrite: # Overwrite if called for (the default when using `__setstate__`)
             overwrite_prev_set = ProbesCollection.overwrite()
             ProbesCollection.overwrite(True)
-        ProbesCollection[name] = self
-        if overwrite:
+            ProbesCollection[name] = self
             ProbesCollection.overwrite(overwrite_prev_set)
+
         self._name = name
 
     def __setstate__(self, state):
+        # The primary purpose here is to rename legacy attributes upon unpickling
         self.__dict__.update(state)
 
         newattrs = {'MethodOfMoments':'Discretization',
@@ -315,8 +379,11 @@ class Probe(object):
                     setattr(self,dest,src)
 
         # Register in Probes collection
-        self.set_name(overwrite=True)
+        self.set_name(overwrite=False) # Don't overwrite unless `ProbesCollections` was otherwise set to `overwrite=True`
 
+    filename_template = '(%s)_Probe.pickle'
+
+    def save(self,*args,**kwargs): return save(self,*args,**kwargs)
         
     def get_a(self): return self._a
 
@@ -419,8 +486,8 @@ class Probe(object):
 
     #--- Momentum space propagators & reflectance
 
-    def getFourPotentialPropagators(self,k=None,farfield=False,\
-                                 kappa_min=None,kappa_max=np.inf,Nkappas=244,\
+    def getFourPotentialPropagators(self,k=None,farfield=False,
+                                 kappa_min=None,kappa_max=np.inf,Nkappas=244,
                                  qquadrature=numrec.GL,recompute=False):
         """
         Outputs a propagator for the scalar potential and for
@@ -452,13 +519,13 @@ class Probe(object):
         if kappa_min is None: kappa_min=self.get_kappa_min()
         Logger.write('\tIncluding evanescent (near-field) waves..')
         self.kappas,self.dkappas=numrec.GetQuadrature(xmin=kappa_min,
-                                            xmax=kappa_max,\
-                                            N=Nkappas,\
+                                            xmax=kappa_max,
+                                            N=Nkappas,
                                             quadrature=qquadrature)
         if farfield and k!=0:
             Logger.write('\tIncluding propogating (far-field) waves..')
-            qs,dqs=numrec.GetQuadrature(xmin=0,xmax=k,\
-                                            N=Nkappas,\
+            qs,dqs=numrec.GetQuadrature(xmin=0,xmax=k,
+                                            N=Nkappas,
                                             quadrature=qquadrature)
             kzs=np.sqrt(k**2-qs**2)
             self.kappasFF=-1j*kzs
@@ -1407,15 +1474,27 @@ class Probe(object):
 
         return Er, Ez
 
-    def gapSpectroscopy(self, gaps = np.logspace(-1.5, 1, 100), \
-                        ncpus = 8, backend = 'multiprocessing', \
-                        Nmodes = 20, recompute=False, ** kwargs):
+    # This function relies heavily on concepts and entities defined in module `ProbeSpectroscopy`
+    def gapSpectroscopy(self, gaps = np.logspace(-1.5, 1, 100),
+                        ncpus = 8, backend = 'multiprocessing',
+                        Nmodes = 20, recompute=False, reload=False,
+                        ** kwargs):
 
         from . import ProbeSpectroscopy as PS
 
-        if recompute or self._gapSpectroscopy is None:
-            self._gapSpectroscopy = PS.ProbeGapSpectroscopyParallel(self, gaps=gaps, \
-                                                                    ncpus=ncpus, backend=backend,\
+        try:
+            if recompute: raise OSError
+            if not hasattr(self,'_gapSpectroscopy') \
+                or self._gapSpectroscopy is None \
+                or reload: # not instructed to recompute, so try first to load from file
+
+                self._gapSpectroscopy = load(self, PS.ProbeGapSpectroscopyParallel)
+                self._gapSpectroscopy.Probe = self # ensure that we re-attach self
+                self._gapSpectroscopy.check() # Check that it made sense to attach self
+
+        except (OSError,ValueError):
+            self._gapSpectroscopy = PS.ProbeGapSpectroscopyParallel(self, gaps=gaps,
+                                                                    ncpus=ncpus, backend=backend,
                                                                     Nmodes=Nmodes, **kwargs)
 
         return self._gapSpectroscopy
