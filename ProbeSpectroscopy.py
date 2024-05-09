@@ -1092,7 +1092,7 @@ class EncodedEigenfields(object):
         qp_eff = kappa * qp
 
         q1 = np.abs(qp_eff)
-        q2 = np.angle(qp_eff)
+        q2 = np.angle(qp_eff) % (2*np.pi) # We want interpolator "look up" to refer to positive phase values from 0 to 2*pi, as they were recorded in the lookup table
 
         assert hasattr(self,'Rmats2D_subs') and hasattr(self,'Rmat2D_interp_subs_r') and len(self.Rmat2D_interp_subs_r),\
             'First compute a library of 2D material reflectance matrices at `qps` for this encoding, via `build_Rmat2D_library(qps)`.'
