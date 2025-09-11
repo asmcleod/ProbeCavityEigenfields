@@ -278,6 +278,21 @@ def load(probe, cls, overwrite_probe=False): #Load the object of `cls` associate
         raise ValueError(msg)
 
     return obj
+
+def wrap_rp(rp,freq_to_wn,q_to_wn):
+    """Wrap `rp` so that it accepts dimensionless arguments, and converts them to wavenumbers,
+    before feeding to the underlying `rp` function."""
+
+    def wrapped_rp(freq,q):
+
+        freq_wn = freq * freq_to_wn
+        q_wn = q * q_to_wn
+        #print('min k (wn): %1.3f'%np.min(2*np.pi*freq_wn)) #Debug messages to ensure we are outside the light cone
+        #print('min q (wn): %1.3f'%np.min(q_wn))
+
+        return rp(freq_wn,q_wn)
+
+    return wrapped_rp
     
 #--- Probe classes
 
@@ -289,6 +304,10 @@ class Probe(object):
                      'L': 19e-4 / 30e-7,
                      'illum_angles': np.linspace(45, 90, 20),
                      'excitation': EPlaneWaveFF}
+
+    # The data type to use for the serious calculations
+    # Helps to NOT use np.complex128, because that is more expensive
+    dtype = np.complex64
     
     def __init__(self,zs=None,rs=None,
                  Nnodes=244,L=None,quadrature=numrec.GL,
@@ -424,7 +443,7 @@ class Probe(object):
     
     def get_kappa_min(self):
 
-        kappa_L = 1/np.max(self.get_zs()) * self._kappa_min_factor
+        kappa_L = 1/np.ptp(self.get_zs()) * self._kappa_min_factor
 
         return kappa_L
         # Disable k-dependence for now, it creates problems when comparing absolute scales of integrated results at different frequencies
@@ -578,11 +597,7 @@ class Probe(object):
             try: return self.rpvals
             except AttributeError: pass
 
-        if rp is None:
-            if hasattr(self,'rp'): rp=self.rp
-            else: rp = lambda freq,q: 1+0j
-
-        else: self.rp=rp
+        if rp is None: rp = lambda freq,q: 1+0j
 
         if hasattr(rp,'__call__'): rpvals=rp(freq,qs,**kwargs)
         elif isinstance(rp,AWA):
@@ -601,7 +616,7 @@ class Probe(object):
 
         return rpvals
 
-    # sometimes `rp` function "leak" the light cone, this lets us buffer it (we are anticipating imprecision in `rp`!)
+    # sometimes `rp` output "leaks" beyond light cone, this lets us buffer it (we are anticipating imprecision in `rp`!)
     light_cone_buffer = 2
 
     def getRpGapPropagator(self,rp_freq,kappas,dkappas,
@@ -635,17 +650,18 @@ class Probe(object):
         if gap is None: gap=self.get_gap()
         if rp_freq is None: rp_freq = self.get_freq()
         rpMat=self.getRpGapPropagator(rp_freq,kappas=dP['kappas'],dkappas=dP['dkappas'],\
-                                       gap=gap,rp=rp,recompute_rp=recompute_rp)
+                                       gap=gap,rp=rp,recompute_rp=recompute_rp).astype(self.dtype)
 
-        MPhi = dP['Phi']
-        MAr = dP['Ar']
-        MAz = dP['Az']
+        MPhi = dP['Phi'].astype(self.dtype)
+        MAr = dP['Ar'].astype(self.dtype)
+        MAz = dP['Az'].astype(self.dtype)
 
         # Mirror sign applies to Coulomb and Ar fields
         # other -1 signs follow from definition of generalized reflectance
-        mirror_sign = -1
+        mirror_sign = self.dtype(-1)
         Zmirror =  MPhi.T @ (mirror_sign * rpMat) @ MPhi
-        if k!=0:
+        #if k!=0:
+        if farfield:
             Zmirror = Zmirror + \
                      -MAr.T @ (mirror_sign * rpMat) @ MAr \
                         - MAz.T @ rpMat @ MAz
@@ -913,7 +929,7 @@ class Probe(object):
         #If we want column vectors
         if as_vector: Qs=np.matrix(Qs).T
 
-        return Qs
+        return Qs.astype(self.dtype)
 
     def get_eigencharge_density(self,eigenindex,as_vector=False):
 
@@ -963,17 +979,21 @@ class Probe(object):
             
         return self._eigenexcitations
 
-    def get_brightness(self, Q, k=None, illum_angles=None, **kwargs):
+    def get_brightness(self, Q, k=None, illum_angles=None,
+                       illum_angle_weights=None,**kwargs):
 
         if k is None: k =self.get_k()
         if illum_angles is None: illum_angles = self.defaults['illum_angles']
 
         Rns = []
         if not hasattr(illum_angles, '__len__'): illum_angles = [illum_angles]
-        for angle in illum_angles:
+        if illum_angle_weights is None: illum_angle_weights = np.ones((len(illum_angles),))
+        elif not hasattr(illum_angle_weights,'__len__'):
+            illum_angle_weights=[illum_angle_weights]*len(illum_angles)
+        for angle,w in zip(illum_angles,illum_angle_weights):
             Exc = self.defaults['excitation'](angle=angle, k=k)
             Rn = self.get_field_overlap(Q, Exc, **kwargs)
-            Rns.append(Rn)
+            Rns.append(Rn*w)
 
         axes=[illum_angles]
         axis_names=['Angle (deg.)']
@@ -994,9 +1014,10 @@ class Probe(object):
         return Rns
     
     def get_eigenbrightness(self, k=None, illum_angles=None,
+                            illum_angle_weights=None,
                             Nmodes=20,recompute=False,
                             **kwargs):
-        """This is the same as `get_eigenexcitations` except brightness is averaged over illumination angles."""
+        """This is the same as `get_eigenexcitations` except we build the plane wave at each of the `illum_angles` automatically."""
 
         if k is None: k =self.get_k()
         if illum_angles is None: illum_angles = self.defaults['illum_angles']
@@ -1012,11 +1033,14 @@ class Probe(object):
         Qs = np.array(self.get_eigencharges())[:Nmodes]
         Bs=[]
         if not hasattr(illum_angles, '__len__'): illum_angles=[illum_angles]
-        for angle in illum_angles:
+        if illum_angle_weights is None: illum_angle_weights = np.ones((len(illum_angles),))
+        elif not hasattr(illum_angle_weights,'__len__'):
+            illum_angle_weights=[illum_angle_weights]*len(illum_angles)
+        for angle,w in zip(illum_angles,illum_angle_weights):
             
             Exc=self.defaults['excitation'](angle=angle, k=k)
             Rn=self.get_field_overlap(Qs,Exc,**kwargs) #Vectorized over all charge vectors
-            Bs.append(Rn)
+            Bs.append(Rn*w)
             
         Bs=AWA(Bs, axes=[illum_angles, None],
                 axis_names=['Angle (deg.)','eigenindex'])
@@ -1135,16 +1159,17 @@ class Probe(object):
         
         return Phi,Ar,Az,Ez
     
-    def getRsampleMatrix(self,freq,gap,Nmodes=20,
+    def getRsampleMatrix(self,rp_freq,gap,Nmodes=20,
                            recompute_rp=True,rp=None,recompute_propagators=False,\
                             farfield=False,
-                           k=None,kappa_min=None,kappa_max=np.inf,qquadrature=numrec.GL,Nkappas=244,\
+                           k=None,kappa_min=None,kappa_max=np.inf,
+                          qquadrature=numrec.GL,Nkappas=244,\
                            **kwargs):
 
         Nmodes=np.min((self.get_Nmodes(),
                        Nmodes))
 
-        Zmirror = self.getSommerfeldMirrorImpedance(gap=gap, rp_freq=freq,
+        Zmirror = self.getSommerfeldMirrorImpedance(gap=gap, rp_freq=rp_freq,
                                                     recompute_rp=recompute_rp, rp=rp,
                                                     recompute_propagators=recompute_propagators,
                                                     farfield=farfield,
@@ -1159,9 +1184,10 @@ class Probe(object):
             
         return RSampMat
     
-    def EradVsGap(self, freq, gapmin=.1, gapmax=4, \
-                  Ngaps=20, zquadrature=numrec.CC, \
-                  Nmodes=20, illum_angles=None, \
+    def EradVsGap(self, freq, gapmin=.1, gapmax=4,
+                  Ngaps=20, zquadrature=numrec.CC,
+                  Nmodes=20, illum_angles=None,
+                  illum_angle_weights=None,
                   farfield=False,
                   rp=None, recompute_rp=True,
                   recompute_propagators=True,
@@ -1176,12 +1202,14 @@ class Probe(object):
         
         #--- Retrieve receptivity of eigenmodes
         # Recompute only if instructed; this whole bit could be removed
-        if recompute_brightness: k=2*np.pi*freq #If we're recomputing, it's because we want brightness at `freq` (in this case, `ZSelf` should also be recomputed in principle..)
+        if recompute_brightness:
+            k= 2 * np.pi * freq #If we're recomputing, it's because we want brightness at `freq` (in this case, `ZSelf` should also be recomputed in principle..)
         else: k=self.get_k()
         Vn=self.get_eigenbrightness(k=k, illum_angles=illum_angles,
+                                    illum_angle_weights=illum_angle_weights,
                                     recompute=recompute_brightness,Nmodes=Nmodes)
-        #If we have an angle axis, average it (axis=0)
-        if Vn.ndim==2: Vn = np.mean(Vn,axis=0)
+        #If we have an angle axis, sum it like an integral (axis=0)
+        if Vn.ndim==2: Vn = np.sum(Vn,axis=0)
         Vn = Vn[:Nmodes]
         Vn=np.matrix(Vn).T
             
@@ -1193,14 +1221,14 @@ class Probe(object):
         Erads=[]
         eigenamplitudes=[]
         ScatMats=[]
-        Logger.write('Computing response for gaps at freq=%s...'%freq)
+        Logger.write('Computing response for %i gaps at freq=%s...' % (len(gaps), freq))
         for gap in gaps:
             
-            self.RSampMat=self.getRsampleMatrix(freq,gap,Nmodes=Nmodes,\
-                                           recompute_rp=recompute_rp,\
-                                           recompute_propagators=recompute_propagators,\
-                                            farfield=farfield,
-                                           rp=rp,**kwargs)
+            self.RSampMat=self.getRsampleMatrix(freq, gap, Nmodes=Nmodes, \
+                                                recompute_rp=recompute_rp, \
+                                                recompute_propagators=recompute_propagators, \
+                                                farfield=farfield,
+                                                rp=rp, **kwargs)
             self.ScatMat = (self.RSampMat-RhoMat).getI()
             if subtract_background: self.ScatMat += RhoMat.getI()
             ScatMats.append(self.ScatMat)
@@ -1225,12 +1253,13 @@ class Probe(object):
     def EradSpectrumDemodulated(self, freqs, gapmin=.1, amplitude=2,
                                 Ngaps=16, zquadrature=numrec.CC,
                                 Nmodes=20, illum_angles=np.linspace(10,80,20),
+                                illum_angle_weights=None,
                                 rp=None, demod_order=4,
                                 farfield=False,
                                 update_propagators=True,
                                 update_brightness=False,
                                 probe_spectroscopy=None,
-                                update_charges=True,
+                                probe_spectroscopy_kwargs={},
                                 **kwargs):
 
         self.all_rp_vals=[]
@@ -1243,13 +1272,16 @@ class Probe(object):
         
         EradsVsFreq=[]
         eigenamplitudesVsFreq=[]
-        if not hasattr(freqs,'__len__'): freqs=[freqs]
-        for freq in freqs:
+        if not hasattr(freqs, '__len__'): freqs=[freqs]
+        for freq_wn in freqs:
             if probe_spectroscopy is not None:
-                probe_spectroscopy.set_eigenset(self,freq,update_charges=update_charges)
-            dErad=self.EradVsGap(freq, gapmin=gapmin, gapmax=gapmax,
+                probe_spectroscopy.set_eigenset(self,freq_wn,
+                                                **probe_spectroscopy_kwargs)
+                # `set_eigenset` will be completely entrusted with reconfiguring the probe
+            dErad=self.EradVsGap(freq_wn, gapmin=gapmin, gapmax=gapmax,
                                  Ngaps=Ngaps, zquadrature=zquadrature,
                                  Nmodes=Nmodes, illum_angles=illum_angles,
+                                 illum_angle_weights=illum_angle_weights,
                                  rp=rp, recompute_rp=True,
                                  farfield=farfield,
                                  recompute_propagators=recompute_propagators,
@@ -1263,9 +1295,9 @@ class Probe(object):
             #if not update_brightness: recompute_brightness=False
         
         gaps=EradsVsFreq[0].axes[0]
-        EradsVsFreq=AWA(EradsVsFreq,axes=[freqs,gaps],
+        EradsVsFreq=AWA(EradsVsFreq, axes=[freqs, gaps],
                         axis_names=['Frequency',r'$z_\mathrm{tip}$']).T
-        eigenamplitudesVsFreq=AWA(eigenamplitudesVsFreq,axes=[freqs,gaps,None],
+        eigenamplitudesVsFreq=AWA(eigenamplitudesVsFreq, axes=[freqs, gaps, None],
                                   axis_names=['Frequency',r'$z_\mathrm{tip}$','eigenindex']).T
         result=dict(Erad=EradsVsFreq,eigenamplitude=eigenamplitudesVsFreq)
         
@@ -1278,52 +1310,58 @@ class Probe(object):
         
         return result
 
-    @staticmethod
-    def wrap_rp(rp,a_nm):
-
-        def wrapped_rp(freq_norm,q_norm):
-
-            freq_wn = freq_norm / (a_nm * 1e-7)
-            q_wn = q_norm / (a_nm * 1e-7)
-            # print('min k (wn): %1.3f'%np.min(2*np.pi*freq_wn)) #Debug messages to ensure we are outside the light cone
-            # print('min q (wn): %1.3f'%np.min(q_wn))
-
-            return rp(freq_wn,q_wn)
-
-        return wrapped_rp
-
     def getNormalizedSignal(self,freqs_wn,rp,
                             a_nm=30,amplitude_nm=50,demod_order=5,
-                            Ngaps=24*4,gapmin=.15,
+                            Ngaps=24*4,gapmin_nm=.15,
+                            L_cm=24e-4,
                             rp_norm = None,
-                            freqs_wn_norm = None,
+                            norm_single_Freq = True,
                             **kwargs):
+
+        # Adapt dimensional arguments to the same units as the probe discretization
+        to_nm = a_nm / self.get_a(); from_nm = 1/to_nm
+        amplitude = amplitude_nm * from_nm
+        gapmin = gapmin_nm * from_nm
+        print('amplitude=',amplitude)
+        print('gapmin=',gapmin)
+        q_to_wn = from_nm * 1e7 # converting q values to wavenumbers will be also be done using the known tip dimensionful radius
+
+        # Convert frequency in wavenumbers to internal units
+        # Properly wrapped `rp` will just undo this conversion identically, back to wavenumbers
+        # But the dimensionless frequencies will be sized according to the indicated probe length `L_cm`
+        L = np.ptp(self.get_zs())  # Height of probe in internal units
+        freq_to_wn = L/L_cm
+        freqs = freqs_wn / freq_to_wn  # conversion factor from wavenumbers to internal frequency units
 
         # Wrap the provided rp functions so they can expand out dimensionless frequencies and wavevectors
         # The supplied reflection function should take `frequency (wavenumbers), q (wavenumbers)`
+        wrapped_rp = wrap_rp(rp,freq_to_wn,q_to_wn)
 
-        amplitude = amplitude_nm / a_nm
-        freqs = freqs_wn * (a_nm * 1e-7)
-        if freqs_wn_norm is None: freqs_wn_norm = np.mean(freqs_wn)
-        freqs_norm = freqs_wn_norm * (a_nm * 1e-7)
-
-        signals = self.EradSpectrumDemodulated(freqs, rp=self.wrap_rp(rp,a_nm),
+        signals = self.EradSpectrumDemodulated(freqs, rp=wrapped_rp,
                                                gapmin=gapmin, amplitude=amplitude,
                                                Ngaps=Ngaps, demod_order=demod_order,
                                                **kwargs)
-
-        # Normalize only if normalization is requested
-        if rp_norm is not None:
-            signals_ref = self.EradSpectrumDemodulated(freqs=freqs_norm, rp=self.wrap_rp(rp_norm,a_nm),
-                                                       gapmin=gapmin, amplitude=amplitude,
-                                                       Ngaps=Ngaps, demod_order=demod_order,
-                                                       **kwargs)
-            signals['Sn'] /= signals_ref['Sn']
 
         signals['Sn'].set_axes([None,freqs_wn],
                                axis_names=[None,'Frequency (cm$^{-1}$)'])
         signals['Erad'].set_axes([None,freqs_wn],
                                  axis_names=[None,'Frequency (cm$^{-1}$)'])
+
+        # Normalize only if normalization is requested
+        if rp_norm is not None:
+            if norm_single_Freq: freqs_wn_norm = np.mean(freqs_wn) # a single frequency
+            else: freqs_wn_norm = freqs_wn
+            freqs_norm = freqs_wn_norm / freq_to_wn
+
+            wrapped_rp_norm = wrap_rp(rp_norm, freq_to_wn,q_to_wn)
+            signals_ref = self.EradSpectrumDemodulated(freqs_norm, rp=wrapped_rp_norm,
+                                                       gapmin=gapmin, amplitude=amplitude,
+                                                       Ngaps=Ngaps, demod_order=demod_order,
+                                                       **kwargs)
+            signals['Sn_norm'] = signals['Sn'] / signals_ref['Sn']
+
+            signals['Sn_norm'].set_axes([None,freqs_wn],
+                                   axis_names=[None,'Frequency (cm$^{-1}$)'])
 
         return signals
     
@@ -1489,7 +1527,7 @@ class Probe(object):
                 or reload: # not instructed to recompute, so try first to load from file
 
                 self._gapSpectroscopy = load(self, PS.ProbeGapSpectroscopyParallel)
-                self._gapSpectroscopy.Probe = self # ensure that we re-attach self
+                self._gapSpectroscopy.EncodedEigenfields = self # ensure that we re-attach self
                 self._gapSpectroscopy.check() # Check that it made sense to attach self
 
         except (OSError,ValueError):
