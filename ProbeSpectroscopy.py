@@ -734,13 +734,14 @@ class EncodedEigenfields(object):
 
     verbose = True
 
-    def __init__(self, Spec,gap0=1, Nmodes=10,
+    def __init__(self, Spec,gap0=1, Nmodes=20,
                 kappa_min=None, kappa_max=np.inf,
                 Nkappas=244*8, qquadrature=PCE.numrec.GL,
                 **brightnesskwargs):
         # This will be the one and only time we have to explicitly calculate eigenfields
         # for any coordinate besides the reference coordinate; ideally all forthcoming
         # computations of reflectance etc. will need only be done for the reference coordinate!
+        # Reference coordinate of tip radius is best, and Nmodes > 15 usually required for convergence on SiO2
 
         #assert isinstance(Spec,ProbeSpectroscopy)
 
@@ -795,6 +796,7 @@ class EncodedEigenfields(object):
         self.Brightnesses = Brightnesses
         self.Poles = Poles
         self.PsiMats_ = PsiMats #underscore because method will share same name
+        self.Nmodes = Nmodes
 
         #--- Attach probe with the correctly signed eigencharges
         self.Probe=P0
@@ -864,12 +866,16 @@ class EncodedEigenfields(object):
         PsiMats = self.PsiMats(*at_gaps)
         PoleMats = self.PoleMats(*at_gaps)
 
-        if RMat0 is not None: Nmodes = RMat0.shape[0] #If a reflection matrix is provided, it has the number of modes desired
-        if Nmodes:
-            Phi0Vecs = Phi0Vecs[:Nmodes]
-            BVecs = BVecs[:,:Nmodes]
-            PsiMats = PsiMats[:,:Nmodes,:Nmodes]
-            PoleMats = PoleMats[:,:Nmodes,:Nmodes]
+        if Nmodes is None:
+            if RMat0 is not None: Nmodes = RMat0.shape[0] #If a reflection matrix is provided, it has the number of modes desired
+            else: Nmodes = self.Nmodes # this is the default number of modes to use
+        elif RMat0 is not None: # we provided Nmodes *and* Rmat0, so truncate to Nmodes
+            RMat0 = RMat0[:Nmodes,:Nmodes]
+
+        Phi0Vecs = Phi0Vecs[:,:Nmodes]
+        BVecs = BVecs[:,:Nmodes]
+        PsiMats = PsiMats[:,:Nmodes,:Nmodes]
+        PoleMats = PoleMats[:,:Nmodes,:Nmodes]
 
         #--- Get RMat for fields at reference gap
         if RMat0 is None:
@@ -956,12 +962,12 @@ class EncodedEigenfields(object):
 
         return result
 
-    def getNormalizedSignal(self,freqs_wn,rp,
-                            a_nm=30,amplitude_nm=50,demod_order=5,
-                            Ngaps=24*4,gapmin_nm=.15,
+    def getNormalizedSignal(self, freqs_wn, rp,
+                            a_nm=30, amplitude_nm=50, demod_order=5,
+                            Ngaps=24*4, gapmin_nm=.15,
                             L_cm=24e-4,
                             rp_norm = None,
-                            norm_single_Freq = True,
+                            norm_single_freq = True,
                             **kwargs):
 
         # Adapt dimensional arguments to the same units as the probe discretization
@@ -993,7 +999,7 @@ class EncodedEigenfields(object):
 
         # Normalize only if normalization is requested
         if rp_norm is not None:
-            if norm_single_Freq: freqs_wn_norm = np.mean(freqs_wn) # a single frequency
+            if norm_single_freq: freqs_wn_norm = np.mean(freqs_wn) # a single frequency
             else: freqs_wn_norm = freqs_wn
             freqs_norm = freqs_wn_norm / freq_to_wn
 
@@ -1016,6 +1022,10 @@ class EncodedEigenfields(object):
 
     # Tools for quick library-based calculation of signal from 2D material
     def build_Rmat2D_library(self,qps=np.logspace(-3, 2, 100)):
+        """Compute a library needed to compute near-field signal of a 2D material on top a semi-infinite substrate.
+
+         Provide `qps` as a monotonic range of (positive) amplitudes of 2D material polariton momenta in units of
+         inverse tip radius."""
 
         kappas = self.kappas
         dkappas = self.dkappas

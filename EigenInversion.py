@@ -25,7 +25,8 @@ class EncodedEigenfieldsPredictor(object):
                  zmin=.1, A=2, Nts=24,
                  harmonic=2,
                  qp_ref=1e8,
-                 eps_ref=1e8):
+                 eps_ref=1e8,
+                 Nmodes=15):
 
         assert isinstance(EncodedEigenfields,PS.EncodedEigenfields)
 
@@ -39,6 +40,7 @@ class EncodedEigenfieldsPredictor(object):
         self.at_gaps = zmin + A * (1 + np.cos(2 * np.pi * self.ts))
         self.freq = EncodedEigenfields.get_probe().get_freq()
         self.EncodedEigenfields = EncodedEigenfields
+        self.Nmodes = Nmodes
         self.Sref = self.set_Sref(qp_ref, eps_ref)
 
         self.is_vectorized = False # The `compute_signal` attribute is NOT vectorized for this Predictor
@@ -58,7 +60,7 @@ class EncodedEigenfieldsPredictor(object):
 
         # Compute scattered field at gap heights; output raw array
         erad_vs_gap = self.EncodedEigenfields.EradVsGap(self.at_gaps, freq=self.freq,
-                                                        RMat0=R0, as_AWA=False)
+                                                        RMat0=R0, as_AWA=False, Nmodes=self.Nmodes)
 
         # here is the demodulation! at quadrature nodes
         erad_vs_gap = np.array(erad_vs_gap)
@@ -145,7 +147,8 @@ class VariationalMaterial2D(object):
                  Nosc_eps=3, amp_eps=1,
                  Nosc_qp=3, amp_qp=0,
                  eps_vals=None,
-                 qp_vals=None):
+                 qp_vals=None,
+                 additional_normalization=None):
 
         self.Predictor = Predictor
         self.freqs = freqs
@@ -170,8 +173,13 @@ class VariationalMaterial2D(object):
                                         'eps_fine',
                                         'qp_coarse',
                                         'qp_fine']
+        self.additional_normalization = additional_normalization
 
-    def set_coarse_params_qp(self, Nosc, amp=0):
+        self.qpmax=1e12 # qp will never be allowed to exceed this value
+
+        self.interrupt_error = False # Make this True to enable raising error upon keyboard interrupt during optimization
+
+    def set_coarse_params_qp(self, Nosc, amp=0, eps0=0):
 
         df = np.max(self.freqs) - np.min(self.freqs)
         gamma = df / Nosc  # Let's have an oscillator every `gamma`
@@ -182,10 +190,11 @@ class VariationalMaterial2D(object):
                           Nosc)
 
         # First term will be offset
-        params = [1, 0] + list(zip(amps, f0s, gammas))  # list of triplets
+        params = [np.real(eps0), np.abs(np.imag(eps0))] \
+                 + list(zip(amps, f0s, gammas))  # list of triplets
         self.qp_coarse_params = list(misc.flatten(params))  # flatten
 
-    def set_coarse_params_eps(self, Nosc, amp=0):
+    def set_coarse_params_eps(self, Nosc, amp=0, eps0=1):
 
         df = np.max(self.freqs) - np.min(self.freqs)
         gamma = df / Nosc  # Let's have an oscillator every `gamma`
@@ -197,7 +206,8 @@ class VariationalMaterial2D(object):
         print(f0s)
 
         # First terms will be offset
-        params = [1, 0] + list(zip(amps, f0s, gammas))  # list of triplets
+        params = [np.real(eps0), np.abs(np.imag(eps0))] \
+                 + list(zip(amps, f0s, gammas))  # list of triplets
         self.eps_coarse_params = list(misc.flatten(params))  # flatten
 
     def faddeeva_oscillator(self, params):  # This is a gaussian oscillator that will be used for local (fine) fitting
@@ -223,6 +233,9 @@ class VariationalMaterial2D(object):
         self.qp_fine_freqs = np.linspace(np.min(self.freqs) - gamma/2,
                                          np.max(self.freqs) + gamma/2,
                                          Nosc)
+        self.qp_faddeeva_basis = [self.faddeeva_oscillator((1,f0,gamma)) \
+                                    for f0,gamma in zip(self.qp_fine_freqs,
+                                                   self.qp_fine_gammas)]
 
     def set_fine_params_eps(self, Nosc, amp=0):
 
@@ -234,9 +247,26 @@ class VariationalMaterial2D(object):
         self.eps_fine_freqs = np.linspace(np.min(self.freqs) - gamma/2,
                                           np.max(self.freqs) + gamma/2,
                                           Nosc)
-        self.faddeeva_basis = [self.faddeeva_oscillator((1,f0,gamma)) \
-                               for f0,gamma in zip(self.eps_fine_freqs,
+        self.eps_faddeeva_basis = [self.faddeeva_oscillator((1,f0,gamma)) \
+                                    for f0,gamma in zip(self.eps_fine_freqs,
                                                    self.eps_fine_gammas)]
+
+    param_names = ['eps_coarse_params',
+                   'eps_fine_amps',
+                    'eps_faddeeva_basis',
+                   'qp_coarse_params',
+                   'qp_fine_amps',
+                   'qp_faddeeva_basis']
+
+    def get_params(self):
+
+        return dict([(param_name,getattr(self,param_name)) \
+                     for param_name in self.param_names])
+
+    def set_params(self,d):
+
+        for param_name in d:
+            setattr(self,param_name,d[param_name])
 
     def oscillators(self, params):  # This is a lorentzian oscillator that will be used for broad (coarse) fitting
 
@@ -254,36 +284,33 @@ class VariationalMaterial2D(object):
 
         return all_osc
 
-    def faddeeva_oscillators(self,params):
-
-        if params is None: return 0
-
-        all_faddeeva_osc = 0
-        for amp,faddeeva_osc in zip(params,self.faddeeva_basis):
-            new_faddeeva_osc =  amp*faddeeva_osc
-            if all_faddeeva_osc is 0: all_faddeeva_osc = new_faddeeva_osc
-            else: all_faddeeva_osc += new_faddeeva_osc
-
-        return all_faddeeva_osc
-
     def get_qps(self):
 
         if self.qp_vals is not None: return self.qp_vals
 
         # Take offset from first of coarse parameters
         params_coarse = copy.copy(list(self.qp_coarse_params))
-        epsr = params_coarse.pop(0)
-        epsi = params_coarse.pop(0)
-        eps = epsr + 1j * np.abs(epsi)
+        eps2Dr = params_coarse.pop(0)
+        eps2Di = params_coarse.pop(0)
+        eps2D = eps2Dr + 1j * np.abs(eps2Di)
 
         # Coarse oscillators
-        eps = eps + self.oscillators(params_coarse)
+        eps2D += self.oscillators(params_coarse)
 
         # Fine oscillators (all fixed freq and gamma)
-        eps = eps + self.faddeeva_oscillators(self.qp_fine_amps)
-        eps = eps.real + 1j * np.abs(eps.imag)
+        eps2D_faddeeva = np.sum([amp*fad for amp,fad \
+                               in zip(self.qp_fine_amps,self.qp_faddeeva_basis)],
+                              axis=0)
+        eps2D += eps2D_faddeeva
+        eps2D = eps2D.real + 1j * np.abs(eps2D.imag)
 
-        return -1 / eps
+        qps = 1 / -eps2D # If eps2D==0, then qp will diverge (no polariton)
+        
+        # Replace any infinities with maximum value
+        qps = np.where(np.isinf(qps),\
+                       self.qpmax,qps)
+        
+        return qps
 
     def get_epss(self):
 
@@ -296,10 +323,14 @@ class VariationalMaterial2D(object):
         eps = epsr + 1j * np.abs(epsi)
 
         # Coarse oscillators
-        eps = eps + self.oscillators(params_coarse)
+        eps += self.oscillators(params_coarse)
 
         # Fine oscillators (all fixed freq and gamma)
-        eps = eps + self.faddeeva_oscillators(self.eps_fine_amps)
+        eps_faddeeva = np.sum([amp*fad for amp,fad \
+                               in zip(self.eps_fine_amps,self.eps_faddeeva_basis)],
+                              axis=0)
+
+        eps += eps_faddeeva
         eps = eps.real + 1j * np.abs(eps.imag)
 
         return eps
@@ -325,10 +356,11 @@ class VariationalMaterial2D(object):
 
         return signal_mult_actual
 
-    def predict(self, eps_offset=None, qp_offset=None):
+    def predict(self, eps_offset=None, qp_offset=None, qps_enabled=True):
 
-        qps = self.get_qps()  # Whether hard-coded or targeted for fit, now get the values for evaluation
         epss = self.get_epss()  # Whether hard-coded or targeted for fit, now get the values for evaluation
+        if qps_enabled: qps = self.get_qps()  # Whether hard-coded or targeted for fit, now get the values for evaluation
+        else: qps = [self.qpmax for eps in epss]
 
         if eps_offset: epss *= (1 + eps_offset)
         if qp_offset: qps *= (1 + qp_offset)
@@ -337,7 +369,12 @@ class VariationalMaterial2D(object):
         else: S_preds = [self.Predictor(qp=qp, eps=eps) for qp, eps in zip(qps, epss)]
         S_preds = np.array(S_preds)
 
-        return S_preds * self.get_signal_mult()
+        result = S_preds * self.get_signal_mult()
+
+        if self.additional_normalization is not None:
+            result /= self.additional_normalization
+
+        return result
 
     def residual(self, params, S_targets_r, S_targets_i, S_targets_std, exp=0.5):
         "Infer by self context whether we are fitting eps, qs, and with how many oscillators."
@@ -363,12 +400,16 @@ class VariationalMaterial2D(object):
             self.eps_fine_amps = params
 
         elif self.optimize_target == 'qp_coarse':
-            self.signal_mult = params[0]
-            self.qp_coarse_params = params[1:]
+            if self.optimize_signal_mult:
+                self.signal_mult = params[0]
+                self.qp_coarse_params = params[1:]
+            else: self.qp_coarse_params = params
 
         elif self.optimize_target == 'qp_fine':
-            self.signal_mult = params[0]
-            self.qp_fine_amps = params[1:]
+            if self.optimize_signal_mult:
+                self.signal_mult = params[0]
+                self.qp_fine_amps = params[1:]
+            else: self.qp_coarse_params = params
 
         else:
             raise ValueError('optimize target must be one of %s!' \
@@ -383,11 +424,13 @@ class VariationalMaterial2D(object):
             params = self.eps_fine_amps
 
         elif self.optimize_target == 'qp_coarse':
-            params = [self.signal_mult]
+            if self.optimize_signal_mult: params = [self.signal_mult]
+            else: params=[]
             params += list(self.qp_coarse_params)
 
         elif self.optimize_target == 'qp_fine':
-            params = [self.signal_mult]
+            if self.optimize_signal_mult: params = [self.signal_mult]
+            else: params=[]
             params += list(self.qp_fine_amps)
 
         else:
@@ -401,7 +444,10 @@ class VariationalMaterial2D(object):
                  factor=1, full_output=False, xtol=1e-3, ftol=1e-3,
                  randomization=1e-3, exit_criterion=1e-3,
                  plot_residuals=False,
+                 optimize_signal_mult=False,
                  **kwargs):
+
+        self.optimize_signal_mult = optimize_signal_mult
 
         S_targets = np.array(S_targets) # Make array type, so there is no AWA nonsense to slow us down
         S_targets_r = S_targets.real
@@ -440,7 +486,9 @@ class VariationalMaterial2D(object):
                                      factor=factor, full_output=full_output, xtol=xtol, ftol=ftol,
                                      **kwargs)[0]
                     self.attach_params(params)
-                    print('signal_mult', self.signal_mult)
+
+                    if self.optimize_signal_mult:
+                        print('Optimized signal_mult =', self.signal_mult)
 
                     # Examine the result
                     print('R=%1.2f; time elapsed (s) in cycle: %1.2f' % (self.R, time.time() - t0))
@@ -453,6 +501,7 @@ class VariationalMaterial2D(object):
 
         except KeyboardInterrupt:
             print('Aborting optimization (with forward progress)...')
+            if self.interrupt_error: raise
 
         except StopIteration: pass
 

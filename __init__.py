@@ -150,7 +150,7 @@ def demodulate(signal_AWA,demod_order=5,quadrature=numrec.GL,Nts=None,verbose=Fa
 
     Sns=[]
     harmonics=np.arange(demod_order+1)
-    kernel_shape= (len(ts),)+(1,)*(signal_AWA.ndim-1)
+    kernel_shape= (len(ts),)+(1,)*(signal_AWA.ndim - 1)
     for harmonic in harmonics:
         kernel = (np.cos(2*np.pi*harmonic*ts) * dts).reshape( kernel_shape )
         if harmonic: kernel -= np.mean(kernel) # this is crucial because any finite mean in kernel might improperly couple in a large DC into the integrand
@@ -1310,12 +1310,12 @@ class Probe(object):
         
         return result
 
-    def getNormalizedSignal(self,freqs_wn,rp,
-                            a_nm=30,amplitude_nm=50,demod_order=5,
-                            Ngaps=24*4,gapmin_nm=.15,
+    def getNormalizedSignal(self, freqs_wn, rp,
+                            a_nm=30, amplitude_nm=50, demod_order=5,
+                            Ngaps=24*4, gapmin_nm=.15,
                             L_cm=24e-4,
                             rp_norm = None,
-                            norm_single_Freq = True,
+                            norm_single_freq = True,
                             **kwargs):
 
         # Adapt dimensional arguments to the same units as the probe discretization
@@ -1335,7 +1335,8 @@ class Probe(object):
 
         # Wrap the provided rp functions so they can expand out dimensionless frequencies and wavevectors
         # The supplied reflection function should take `frequency (wavenumbers), q (wavenumbers)`
-        wrapped_rp = wrap_rp(rp,freq_to_wn,q_to_wn)
+        if hasattr(rp,'__call__'): wrapped_rp = wrap_rp(rp,freq_to_wn,q_to_wn)
+        else: wrapped_rp = rp # just numbers
 
         signals = self.EradSpectrumDemodulated(freqs, rp=wrapped_rp,
                                                gapmin=gapmin, amplitude=amplitude,
@@ -1349,11 +1350,13 @@ class Probe(object):
 
         # Normalize only if normalization is requested
         if rp_norm is not None:
-            if norm_single_Freq: freqs_wn_norm = np.mean(freqs_wn) # a single frequency
+            if norm_single_freq: freqs_wn_norm = np.mean(freqs_wn) # a single frequency
             else: freqs_wn_norm = freqs_wn
             freqs_norm = freqs_wn_norm / freq_to_wn
 
-            wrapped_rp_norm = wrap_rp(rp_norm, freq_to_wn,q_to_wn)
+            if hasattr(rp_norm,'__call__'): wrapped_rp_norm = wrap_rp(rp_norm, freq_to_wn,q_to_wn)
+            else: wrapped_rp_norm = rp_norm
+
             signals_ref = self.EradSpectrumDemodulated(freqs_norm, rp=wrapped_rp_norm,
                                                        gapmin=gapmin, amplitude=amplitude,
                                                        Ngaps=Ngaps, demod_order=demod_order,
