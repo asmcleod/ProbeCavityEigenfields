@@ -305,6 +305,8 @@ class ProbeSpectroscopy(object):
         self._eigencharges_AWA = self._eigencharges_AWA.sort_by_axes()
         self._eigencharges_AWA = self.align_eigencharge_signs(self._eigencharges_AWA)
 
+        self._eigenbrightnesses_AWA = None # These will have to be recomputed
+
         #self.sorted_eigenrhos = all_rhos
         #self.sorted_eigencharges = all_charges
 
@@ -376,34 +378,27 @@ class ProbeSpectroscopy(object):
 
         return eigencharges_aligned
 
-    def get_eigencharges_AWA(self,Nmodes=None):
+    def get_eigencharges_AWA(self):
 
-        result = self._eigencharges_AWA
-        if Nmodes is not None: result = result[:Nmodes]
+        try:
+            result = self._eigencharges_AWA
+            if result is None: raise AttributeError
+        except AttributeError:
+            return None
 
         return result
 
-    def get_eigenbrightness_AWA(self, Nmodes=None, recompute=False,
-                                eigencharges_AWA=None,
-                                angles=None,
+    def get_eigenbrightness_AWA(self, angles=None,recompute=False,
                                 verbose=True, **kwargs):
 
         try:
-            precomputed = self._brightnesses_AWA
-            if (Nmodes and Nmodes != len(precomputed)) or recompute: #If we need more modes than we have, also recompute
-                raise AttributeError
-            return precomputed[:Nmodes]
-        except AttributeError:
-            import traceback
-            pass #proceed to evaluate
+            result = self._eigenbrightnesses_AWA
+            if result is None or recompute: raise AttributeError
+            return result
+        except AttributeError: pass # proceed to compute
 
-        if Nmodes is None: Nmodes=10
-
-        if eigencharges_AWA is None:
-            eigencharges_AWA = self.get_eigencharges_AWA(Nmodes)
+        eigencharges_AWA = self.get_eigencharges_AWA()
         coords=eigencharges_AWA.axes[1]
-        if Nmodes:
-            eigencharges_AWA = eigencharges_AWA[:Nmodes]
 
         if verbose: Logger.write('Computing brightnesses across %i spectroscopy coordinates...'%len(coords))
 
@@ -417,11 +412,11 @@ class ProbeSpectroscopy(object):
             brightnesses = np.mean(brightnesses,axis=0)
             all_brightnesses.append(brightnesses)
 
-        self._brightnesses_AWA = AWA(all_brightnesses,
+        self._eigenbrightnesses_AWA = AWA(all_brightnesses,
                                           axes=[coords,None],
                                           axis_names=['coordinate','eigenindex']).T #transpose to conform with previous convention
 
-        return self._brightnesses_AWA
+        return self._eigenbrightnesses_AWA
 
 
     def plot_eigenrhos_scatter(self,Nmodes=10,versus_coord=False,**kwargs):
@@ -526,7 +521,7 @@ def compute_eigenset_at_gap(P, gap=1, k=0, sommerfeld=True,
         # Use sommerfeld calculation because it's faster
         # Make the q-grid adaptive; as gap gets smaller, there is sampling to higher q-values
         if sommerfeld and 'kappa_max' not in kwargs:
-            kwargs['kappa_max'] = 10*np.max( (1/gap, 1/P.get_a()) )
+            kwargs['kappa_max'] = 20*np.max( (1/gap, 1/P.get_a()) )
         Zmirror = P.get_mirror_impedance(k=k, recompute=True, sommerfeld=sommerfeld, **kwargs)
         Zself = P.get_self_impedance(recompute=False, display=False)
 
@@ -660,7 +655,7 @@ class ProbeGapSpectroscopyParallel(ProbeSpectroscopyParallel):
     def __init__(self, Probe, gaps=np.logspace(-1.5, 1, 100), \
                  ncpus=8, backend='multiprocessing', \
                  Nmodes=20, sommerfeld=True,
-                 basis_gap=None,
+                 basis_gap='tip radius',
                  reversed=False,
                  **kwargs):
 
@@ -670,7 +665,10 @@ class ProbeGapSpectroscopyParallel(ProbeSpectroscopyParallel):
         ZSelf = Probe.get_self_impedance(k=Probe.get_k(), recompute=False)
 
         if basis_gap:
-            print('We are computing an eigenset at gap=%1.2f, and using its first %i modes as a basis for forthcoming calculations!'%(basis_gap,Nmodes))
+            if basis_gap is 'tip radius':
+                basis_gap = Probe.get_a()
+                print('Using basis gap, with default value equalling the tip radius = %1.2G .'%basis_gap)
+            print('We are computing an eigenset at gap=%1.2G, and using its first %i modes as a basis for forthcoming calculations!'%(basis_gap,Nmodes))
             #--- Make sure we make the zeroth eigensolution available for the dispatched worker
             compute_eigenset_at_gap(Probe, gap=basis_gap, k=0, sommerfeld=sommerfeld,
                                     basis=None, **kwargs) #This will attach desired eigenset to `P`
@@ -746,7 +744,7 @@ class EncodedEigenfields(object):
         #assert isinstance(Spec,ProbeSpectroscopy)
 
         #--- Get reference probe and reference brightnesses
-        eigencharges_vs_gap = Spec.get_eigencharges_AWA(Nmodes=Nmodes)
+        eigencharges_vs_gap = Spec.get_eigencharges_AWA()[:Nmodes]
         gaps = eigencharges_vs_gap.axes[1] # axes are eigenindex, coordinate, zprobe
         if self.verbose: Logger.write('Encoding %i eigenfields to gap=%1.2g across %i gap values from gap=(%1.2g to %1.2g)...' \
                          % (len(eigencharges_vs_gap),
@@ -760,30 +758,29 @@ class EncodedEigenfields(object):
                                            kappa_min=kappa_min, kappa_max=kappa_max, Nkappas=Nkappas,
                                            recompute=True, qquadrature=qquadrature)
         kappas = dP['kappas']
-        dkappas = dP['dkappas']; dKappas = np.matrix(np.diag(dkappas))
+        dkappas = dP['dkappas']; dKappas = dkappas[:,np.newaxis]
 
         #--- Compute eigenfields and their brightnesses at all gaps
         PhisVsGap=[] # axes will be `gap,eigenindex,q`
         for gap in gaps:
-            Pgap = np.matrix(np.diag(np.exp(-gap*kappas)))
-            ChargeMat = np.matrix( eigencharges_vs_gap.cslice[:,gap,:] ).T #column vectors of eigencharges
-            PhiMat = Pgap @ dP['Phi'] @ ChargeMat #This is already the Fourier transform of the potential multiplied by q
+            Pgap = np.exp(-gap*kappas)
+            ChargeMat = eigencharges_vs_gap.cslice[:,gap,:].T #column vectors of eigencharges
+            PhiMat = Pgap[:,np.newaxis] * (dP['Phi'] @ ChargeMat) #This is already the Fourier transform of the potential multiplied by q
             PhisVsGap.append( np.array(PhiMat).T ) #append row vectors, axes are `eigenindex,q`
         Phis0 = PhisVsGap[ind0]
 
         #--- Evaluate encoding matrix at each gap
-        Phi0Vecs = np.matrix(Phis0).T
+        Phi0Vecs = Phis0.T
         PsiMats = [] # list will run over gaps
         for i,gap in enumerate(gaps):
-            PhiMat = np.matrix(PhisVsGap[i]).T #eigenfields at `gap` as column vectors
+            PhiMat = PhisVsGap[i].T #eigenfields at `gap` as column vectors
             # matrix elements for `PsiMat` are `(phi_n(z0)|q|phi_m(z))`
             # (where bra-ket already has `dq q^2 = `dq q` measure times `q` orthogonality operand)
-            PsiMat = Phi0Vecs.T @ dKappas @ PhiMat
+            PsiMat = Phi0Vecs.T @ (dKappas * PhiMat)
             PsiMats.append(PsiMat)
 
         #--- Package results
-        Brightnesses = Spec.get_eigenbrightness_AWA(Nmodes=Nmodes, recompute=False,
-                                                    eigencharges_AWA = eigencharges_vs_gap,
+        Brightnesses = Spec.get_eigenbrightness_AWA(eigencharges_AWA = eigencharges_vs_gap,
                                                     **brightnesskwargs)[:Nmodes].T #Put coordinate (gaps) axis first
         Poles = Spec.get_eigenrhos_AWA(Nmodes=Nmodes).T #Put coordinate (gaps) axis first
         PsiMats = AWA(PsiMats, axes=[gaps, None,None],
@@ -792,7 +789,7 @@ class EncodedEigenfields(object):
         self.kappas = kappas
         self.dkappas = dkappas
         self.Phis0 = Phis0
-        self.Phi0Vecs = np.matrix(Phis0).T #column vectors of scalar potential vs. kappa
+        self.Phi0Vecs = Phi0Vecs #column vectors of scalar potential vs. kappa
         self.Brightnesses = Brightnesses
         self.Poles = Poles
         self.PsiMats_ = PsiMats #underscore because method will share same name
@@ -816,12 +813,12 @@ class EncodedEigenfields(object):
     def save(self, overwrite=False):  return PCE.save(self, overwrite=overwrite)
 
     @functools.lru_cache(maxsize=3) #Likely to be called often with the same arguments
-    def BVecs(self, *at_coords, extrapolate=True):
+    def BVecs(self, *at_coords, extrapolate=True, kind='linear'):
 
         brightnesses_at_coords = self.Brightnesses.interpolate_axis(at_coords, axis=0,
                                                                   extrapolate=extrapolate,
                                                                   bounds_error=(not extrapolate),
-                                                                  kind='quadratic')
+                                                                  kind=kind)
         self._BVecs = [np.matrix(brightnesses_at_coord).T for
                        brightnesses_at_coord in brightnesses_at_coords] #column vectors
         self._BVecs = np.array(self._BVecs)
@@ -829,12 +826,12 @@ class EncodedEigenfields(object):
         return self._BVecs
 
     @functools.lru_cache(maxsize=3) #Likely to be called often with the same arguments
-    def PsiMats(self, *at_coords, extrapolate=True):
+    def PsiMats(self, *at_coords, extrapolate=True, kind='linear'):
 
         PsiMats_at_coords = self.PsiMats_.interpolate_axis(at_coords, axis=0,
                                                           extrapolate=extrapolate,
                                                           bounds_error=(not extrapolate),
-                                                          kind='quadratic')
+                                                          kind=kind)
         self._PsiMats = [np.matrix(PsiMat_at_coord) for
                          PsiMat_at_coord in PsiMats_at_coords] #column vectors
         self._PsiMats = np.array(self._PsiMats)
@@ -842,12 +839,12 @@ class EncodedEigenfields(object):
         return self._PsiMats
 
     @functools.lru_cache(maxsize=3) #Likely to be called often with the same arguments
-    def PoleMats(self, *at_coords, extrapolate=True):
+    def PoleMats(self, *at_coords, extrapolate=True,kind='linear'):
 
         Poles_at_coords = self.Poles.interpolate_axis(at_coords, axis=0,
                                                           extrapolate=extrapolate,
                                                           bounds_error=(not extrapolate),
-                                                          kind='quadratic')
+                                                          kind=kind)
         self._PoleMats = [np.matrix(np.diag(Poles_at_coord)) for
                          Poles_at_coord in Poles_at_coords] #column vectors
         self._PoleMats = np.array(self._PoleMats)
@@ -855,16 +852,16 @@ class EncodedEigenfields(object):
         return self._PoleMats
 
     def EradVsGap(self, at_gaps, freq, RMat0=None, Nmodes=None,rp=None,
-                  record_rp_vals=False, as_AWA=True, **kwargs):
+                  record_rp_vals=False, as_AWA=True, kind='linear',**kwargs):
 
         #--- Get ingredients and restrict to a narrower range of `Nmodes` if requested
         kappas = self.kappas
         dkappas = self.dkappas
         Phi0Vecs = self.Phi0Vecs #column vectors of scalar field vs kappa
 
-        BVecs = self.BVecs(*at_gaps)
-        PsiMats = self.PsiMats(*at_gaps)
-        PoleMats = self.PoleMats(*at_gaps)
+        BVecs = self.BVecs(*at_gaps,kind=kind)
+        PsiMats = self.PsiMats(*at_gaps,kind=kind)
+        PoleMats = self.PoleMats(*at_gaps,kind=kind)
 
         if Nmodes is None:
             if RMat0 is not None: Nmodes = RMat0.shape[0] #If a reflection matrix is provided, it has the number of modes desired
@@ -892,7 +889,8 @@ class EncodedEigenfields(object):
                 except AttributeError: pass
             # Here we can see `Phi0Vecs` has column vectors that are the Hankel transform of the potential multiplied by q
             # or, equivalently, they are the Hankel transform of the Ez-eigenfield
-            RMat0 = Phi0Vecs.T @ np.diag(dkappas * rp_vs_q) @ Phi0Vecs
+            #RMat0 = Phi0Vecs.T @ np.diag(dkappas * rp_vs_q) @ Phi0Vecs
+            RMat0 = Phi0Vecs.T @ ((dkappas * rp_vs_q)[:,np.newaxis] * Phi0Vecs) # This is much more efficient than building a huge diagonal matrix
         else:
             assert RMat0.shape == PsiMats[0].shape,\
                 '`RMat` must be of shape `Nmodes x Nmodes`!'
@@ -1047,8 +1045,10 @@ class EncodedEigenfields(object):
 
             nonlocal qs, Phi0Vecs, dkappas
             rp1_vs_q, rp2_vs_q = get_rps2D(qs / qp)
-            R1 = Phi0Vecs.T @ np.diag(dkappas * rp1_vs_q) @ Phi0Vecs
-            R2 = Phi0Vecs.T @ np.diag(dkappas * rp2_vs_q) @ Phi0Vecs
+            #R1 = Phi0Vecs.T @ np.diag(dkappas * rp1_vs_q) @ Phi0Vecs
+            #R2 = Phi0Vecs.T @ np.diag(dkappas * rp2_vs_q) @ Phi0Vecs
+            R1 = Phi0Vecs.T @ ((dkappas * rp1_vs_q)[:,np.newaxis] * Phi0Vecs) #This is much more efficient than building a huge diagonal matrix
+            R2 = Phi0Vecs.T @ ((dkappas * rp2_vs_q)[:,np.newaxis] * Phi0Vecs)
             return R1, R2
 
         Nmodes = len(Phi0Vecs.T) # Row vectors of eigenfields
@@ -1188,6 +1188,7 @@ def find_roots_custom(p, scaling=10):
 class InvertibleEigenfields(object):
 
     verbose = True
+    filename_template = '(%s)_InvertibleEigenfields.pickle'
 
     def __init__(self, GapSpec, Nmodes=20,
                  interpolation='cubic',**kwargs):
@@ -1196,7 +1197,7 @@ class InvertibleEigenfields(object):
         stability and smoothness in approach curves...
         (although overall """
 
-        Brightnesses = GapSpec.get_eigenbrightness_AWA(Nmodes=Nmodes, recompute=False).T  # Put coordinate (gaps) axis first
+        Brightnesses = GapSpec.get_eigenbrightness_AWA()[:Nmodes].T  # Put coordinate (gaps) axis first
         self.Rs = Brightnesses**2 #@TODO: Might want to double check this
         self.Ps = GapSpec.get_eigenrhos_AWA(Nmodes=Nmodes).T  # Put coordinate (gaps) axis first
 
@@ -1308,8 +1309,6 @@ class InvertibleEigenfields(object):
 
         # max harmonic resolvable will by 1/dt=Nts
         if not Nts: Nts = 8 * (harmonic+1)
-        #Nts=48
-        print('Nts=',Nts)
         if isinstance(quadrature, str) or hasattr(quadrature, 'calc_nodes'):
             ts, wts = numrec.GetQuadrature(N=Nts, xmin=-.5, xmax=0, quadrature=quadrature)
 
@@ -1420,7 +1419,9 @@ class InvertibleEigenfields(object):
             signals_ref={}
             signals_ref['Sn'] = self.EradSpectrumDemodulated(beta_norm, zmin=gapmin,amplitude=amplitude,
                                                              max_harmonic=max_harmonic,Nts=Ngaps, Nmodes=Nmodes)
-            signals['Sn_norm'] = signals['Sn'] / signals_ref['Sn']
+            if signals_ref['Sn'].ndim == 1:
+                signals['Sn_norm'] = signals['Sn'] / signals_ref['Sn'][:,np.newaxis]
+            else: signals['Sn_norm'] = signals['Sn'] / signals_ref['Sn']
 
         return signals
 

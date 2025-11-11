@@ -228,7 +228,7 @@ if not os.path.exists(probe_models_dir): os.mkdir(probe_models_dir)
 
 def get_filepath(probe, cls): #Get the filepath for object of `cls` associated with `probe`
 
-    if  isinstance(probe,Probe): probe_name = probe.get_name()
+    if isinstance(probe,Probe): probe_name = probe.get_name()
     else:
         assert isinstance(probe,str)
         probe_name = probe
@@ -257,6 +257,7 @@ def save(obj, overwrite=False):
 def load(probe, cls, overwrite_probe=False): #Load the object of `cls` associated with `probe`
 
     filepath = get_filepath(probe,cls)
+    print('Attemping to load from file "%s"...'%filepath)
 
     prev_val = ProbesCollection._overwrite
     if overwrite_probe: #(temporarily) set to overwrite if commanded
@@ -352,6 +353,7 @@ class Probe(object):
         self._eigencharges=None
         self._eigenexcitations=None
         self._kappa_min_factor=.1 #This will already put qs very close to the light line:  `qs/k ~ 1 + (factor)**2/2`
+        self._kappa_max_factor=20 # This will make maximum kappa value in quadratures at least 20 inverse probe radii
         
         self._ZSelf=None
         self._ZMirror=None
@@ -452,6 +454,12 @@ class Probe(object):
 
         # return whichever of the two is larger (not to undersample the probe length!)
         #return np.max( (kappa_L, kappa_k) )
+
+    def get_kappa_max(self):
+
+        kappa_a = 1/self.get_a()
+
+        return kappa_a * self._kappa_max_factor
     
     def get_gap(self): return copy.copy(self._gap)
         
@@ -506,7 +514,7 @@ class Probe(object):
     #--- Momentum space propagators & reflectance
 
     def getFourPotentialPropagators(self,k=None,farfield=False,
-                                 kappa_min=None,kappa_max=np.inf,Nkappas=244,
+                                 kappa_min=None,kappa_max=None,Nkappas=244,
                                  qquadrature=numrec.GL,recompute=False):
         """
         Outputs a propagator for the scalar potential and for
@@ -536,6 +544,7 @@ class Probe(object):
 
         #--- Prepare Quadrature Grid
         if kappa_min is None: kappa_min=self.get_kappa_min()
+        if kappa_max is None: kappa_max=self.get_kappa_max()
         Logger.write('\tIncluding evanescent (near-field) waves..')
         self.kappas,self.dkappas=numrec.GetQuadrature(xmin=kappa_min,
                                             xmax=kappa_max,
@@ -563,7 +572,7 @@ class Probe(object):
         J1=j1(Qs*Rs)
 
         #--- Coulomb propagator
-        PCoul = np.matrix( (Cos*Kappas*J0 + Sin*Qs*J1) * Exp * Dts) #post-factor would be `J0(q*rho)`
+        PCoul = (Cos*Kappas*J0 + Sin*Qs*J1) * Exp * Dts #post-factor would be `J0(q*rho)`
         #PCoul = (2*np.pi * 1j/k) * np.matrix( -(Cos*Kappas - Sin*Qs) * Exp * Dts) #post-factor would be `J0(q*rho)`
         #PCoul = (2 * np.pi * 1j / k) * np.matrix(
         #    -(Sin * Kappas + Cos * Qs) * Exp * Dts)  # post-factor would be `J0(q*rho)`
@@ -573,10 +582,10 @@ class Probe(object):
             PAz = PAr = np.zeros(PCoul.shape)
         else:
             #--- Az propagator
-            PAz = 1j*k * np.matrix( +Cos*J0 * Exp * Dts) #post-factor would be `J0(q*rho)`
+            PAz = 1j*k * ( +Cos*J0 * Exp * Dts) #post-factor would be `J0(q*rho)`
 
             #--- Ar propagator
-            PAr = 1j*k * np.matrix( +Sin*J1 * Exp * Dts) #post-factor would be `J1(q*rho)`
+            PAr = 1j*k * ( +Sin*J1 * Exp * Dts) #post-factor would be `J1(q*rho)`
 
         self._fourpotentialpropagators = dict(Phi=PCoul,
                                                 Az=PAz,
@@ -630,15 +639,13 @@ class Probe(object):
         rpvals=self.getRp(rp_freq,qs,rp=rp,recompute=recompute_rp,**kwargs)
 
         # if `kappas`, then `kzs=1j*kappas`
-        rpmat=np.diag(rpvals*np.exp(-2*kappas*gap)*dkappas)
-
-        return np.matrix(rpmat)
+        return rpvals*np.exp(-2*kappas*gap)*dkappas
 
     def getSommerfeldMirrorImpedance(self,k=None,gap=None,
                                        recompute_rp=True,rp=None,rp_freq=None,
                                        recompute_propagators=False,farfield=False,
                                        qquadrature=numrec.GL,Nkappas=244,
-                                       kappa_min=None,kappa_max=np.inf,
+                                       kappa_min=None,kappa_max=None,
                                        **kwargs):
 
         #--- Ingredients for sommerfeld integral
@@ -649,8 +656,9 @@ class Probe(object):
                                             **kwargs)
         if gap is None: gap=self.get_gap()
         if rp_freq is None: rp_freq = self.get_freq()
-        rpMat=self.getRpGapPropagator(rp_freq,kappas=dP['kappas'],dkappas=dP['dkappas'],\
+        rpP = self.getRpGapPropagator(rp_freq,kappas=dP['kappas'],dkappas=dP['dkappas'],\
                                        gap=gap,rp=rp,recompute_rp=recompute_rp).astype(self.dtype)
+        rpP = rpP[:,np.newaxis]
 
         MPhi = dP['Phi'].astype(self.dtype)
         MAr = dP['Ar'].astype(self.dtype)
@@ -659,12 +667,12 @@ class Probe(object):
         # Mirror sign applies to Coulomb and Ar fields
         # other -1 signs follow from definition of generalized reflectance
         mirror_sign = self.dtype(-1)
-        Zmirror =  MPhi.T @ (mirror_sign * rpMat) @ MPhi
+        Zmirror =  MPhi.T @ (mirror_sign * rpP * MPhi)
         #if k!=0:
         if farfield:
             Zmirror = Zmirror + \
-                     -MAr.T @ (mirror_sign * rpMat) @ MAr \
-                        - MAz.T @ rpMat @ MAz
+                     -MAr.T @ (mirror_sign * rpP * MAr) \
+                        - MAz.T @ (rpP * MAz)
 
         return Zmirror
         
@@ -1119,7 +1127,7 @@ class Probe(object):
     
     def getFourPotentialAtZ(self,rs=np.logspace(-1,2,100),z=0,\
                             farfield=False,k=None,\
-                            kappa_min=None,kappa_max=np.inf,Nkappas=244,
+                            kappa_min=None,kappa_max=None,Nkappas=244,
                              qquadrature=numrec.GL):
         
         #--- Obtain propagators
@@ -1131,26 +1139,26 @@ class Probe(object):
                                          qquadrature=qquadrature,recompute=True)
         kappas = dP['kappas']; dkappas = dP['dkappas']
         qs=np.sqrt(k**2+kappas**2).real
-        Pgap = np.matrix(np.diag(np.exp((z-gap)*kappas)))
+        Pgap = np.exp((z-gap)*kappas)
         
         #--- Obtain matrix representations of charges and real-space factors
         Cs = self.get_eigencharges(as_vector=True)
-        dKappas = np.matrix(np.diag(dkappas))
-        Kappas = np.matrix(np.diag(kappas))
+        dKappas = dkappas[:,np.newaxis]
+        Kappas = kappas[:,np.newaxis]
         
         Rs = rs[:,np.newaxis]
         Qs = qs[np.newaxis,:]
-        J0s = np.matrix(j0(Rs*Qs))
-        J1s = np.matrix(j1(Rs*Qs))
+        J0s = j0(Rs*Qs)
+        J1s = j1(Rs*Qs)
         
-        MPhi = Pgap @ dP['Phi'] @ Cs #This is alread the Fourier transform multiplied by q
-        MAr = Pgap @ dP['Ar'] @ Cs
-        MAz = Pgap @ dP['Az'] @ Cs
+        MPhi = Pgap[:,np.newaxis] * (dP['Phi'] @ Cs) #This is alread the Fourier transform multiplied by q
+        MAr = Pgap[:,np.newaxis] * (dP['Ar'] @ Cs)
+        MAz = Pgap[:,np.newaxis] * (dP['Az'] @ Cs)
         
-        Phi = +J0s @ dKappas @ MPhi
-        Ar = +J0s @ dKappas @ MAr
-        Az = +J1s @ dKappas @ MAz
-        Ez = +J0s @ Kappas @ dKappas @ MPhi 
+        Phi = +J0s @ (dKappas * MPhi)
+        Ar = +J0s @ (dKappas * MAr)
+        Az = +J1s @ (dKappas * MAz)
+        Ez = +J0s @ (Kappas * dKappas * MPhi)
         
         Phi = AWA(Phi.T, axes=[None,rs], axis_names=['eigenindex',r'$r/a$'])
         Ar = AWA(Ar.T, adopt_axes_from=Phi)
@@ -1162,7 +1170,7 @@ class Probe(object):
     def getRsampleMatrix(self,rp_freq,gap,Nmodes=20,
                            recompute_rp=True,rp=None,recompute_propagators=False,\
                             farfield=False,
-                           k=None,kappa_min=None,kappa_max=np.inf,
+                           k=None,kappa_min=None,kappa_max=None,
                           qquadrature=numrec.GL,Nkappas=244,\
                            **kwargs):
 
@@ -1198,7 +1206,7 @@ class Probe(object):
         #--- Get initial mode amplitudes
         Nmodes=np.min((self.get_Nmodes(),\
                        Nmodes))
-        RhoMat=np.matrix(np.diag(self.get_eigenrhos()[:Nmodes]))
+        RhoMat=np.diag(self.get_eigenrhos()[:Nmodes])
         
         #--- Retrieve receptivity of eigenmodes
         # Recompute only if instructed; this whole bit could be removed
@@ -1230,12 +1238,12 @@ class Probe(object):
                                                 farfield=farfield,
                                                 rp=rp, **kwargs)
             self.ScatMat = (self.RSampMat-RhoMat).getI()
-            if subtract_background: self.ScatMat += RhoMat.getI()
+            if subtract_background: self.ScatMat += np.matrix(RhoMat).getI()
             ScatMats.append(self.ScatMat)
             # Store the radiated field, as well as the population of eigenmodes
-            Erad = complex(Vn.T @ (self.ScatMat) @ Vn)
+            Erad = complex(Vn.T @ self.ScatMat @ Vn)
             Erads.append(Erad)
-            eigenamplitudes.append(np.array( (self.ScatMat) @ Vn).squeeze())
+            eigenamplitudes.append(np.array( self.ScatMat @ Vn).squeeze())
             
             recompute_rp=False
             recompute_propagators=False

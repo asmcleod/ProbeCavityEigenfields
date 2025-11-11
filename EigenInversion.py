@@ -153,6 +153,7 @@ class VariationalMaterial2D(object):
         self.Predictor = Predictor
         self.freqs = freqs
         self.R = None
+        self.print_residual = False
 
         if eps_vals and not hasattr(eps_vals, '__len__'):
             eps_vals = [eps_vals] * len(freqs)
@@ -242,7 +243,7 @@ class VariationalMaterial2D(object):
         self.eps_fine_amps = list(amp / (1 + np.arange(Nosc)))  # First will be offset
         df = np.max(self.freqs) - np.min(self.freqs)
         gamma = df/Nosc
-        gamma_boost=1.5
+        gamma_boost=0.5
         self.eps_fine_gammas = [gamma*gamma_boost] * Nosc  # Let's have an oscillator every `gamma`
         self.eps_fine_freqs = np.linspace(np.min(self.freqs) - gamma/2,
                                           np.max(self.freqs) + gamma/2,
@@ -369,17 +370,18 @@ class VariationalMaterial2D(object):
         else: S_preds = [self.Predictor(qp=qp, eps=eps) for qp, eps in zip(qps, epss)]
         S_preds = np.array(S_preds)
 
-        result = S_preds * self.get_signal_mult()
+        if qps_enabled:
+            S_preds = S_preds * self.get_signal_mult()
 
         if self.additional_normalization is not None:
-            result /= self.additional_normalization
+            S_preds /= self.additional_normalization
 
-        return result
+        return S_preds
 
     def residual(self, params, S_targets_r, S_targets_i, S_targets_std, exp=0.5):
         "Infer by self context whether we are fitting eps, qs, and with how many oscillators."
 
-        assert len(S_targets_r) == len(self.freqs)
+        #assert len(S_targets_r) == len(self.freqs)
         assert self.eps_vals is None or self.qp_vals is None, 'Nothing to optimize!'
 
         self.attach_params(params)
@@ -388,8 +390,9 @@ class VariationalMaterial2D(object):
 
         Rs = (np.abs(S_preds - S_targets) / S_targets_std) ** exp
         self.R = np.sum(Rs)  # Store a metric for us to inspect later
+        if self.print_residual: print(self.R)
 
-        return Rs
+        return Rs.flatten()
 
     def attach_params(self, params):
 
@@ -409,7 +412,7 @@ class VariationalMaterial2D(object):
             if self.optimize_signal_mult:
                 self.signal_mult = params[0]
                 self.qp_fine_amps = params[1:]
-            else: self.qp_coarse_params = params
+            else: self.qp_fine_amps = params
 
         else:
             raise ValueError('optimize target must be one of %s!' \
@@ -509,6 +512,7 @@ class VariationalMaterial2D(object):
 
         best_ind = np.argmin(all_R_vals)
         self.attach_params(all_params[best_ind])
+        self.R = all_R_vals[best_ind]
 
         if plot_residuals:
             plt.figure()
