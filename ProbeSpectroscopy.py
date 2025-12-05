@@ -1019,11 +1019,19 @@ class EncodedEigenfields(object):
         return P.getFourPotentialAtZ(*args,**kwargs)
 
     # Tools for quick library-based calculation of signal from 2D material
-    def build_Rmat2D_library(self,qps=np.logspace(-3, 2, 100)):
+    def build_Rmat2D_library(self,qps=None,
+                             interp_kwargs = dict(s=0,kx=2,ky=2)):
         """Compute a library needed to compute near-field signal of a 2D material on top a semi-infinite substrate.
 
          Provide `qps` as a monotonic range of (positive) amplitudes of 2D material polariton momenta in units of
-         inverse tip radius."""
+         inverse tip radius.
+
+         For `interp_kwargs` to `scipy.optimize.RectBivariateSpline`,
+         smoothing factor `s=0` is for interpolation, `kx` and `ky` are degrees of spline"""
+
+        if qps is None:
+            q0 = 1/self.get_probe().get_a() # A typical scale for qp
+            qps = np.logspace(-3, 2, 100) * q0
 
         kappas = self.kappas
         dkappas = self.dkappas
@@ -1047,8 +1055,8 @@ class EncodedEigenfields(object):
             rp1_vs_q, rp2_vs_q = get_rps2D(qs / qp)
             #R1 = Phi0Vecs.T @ np.diag(dkappas * rp1_vs_q) @ Phi0Vecs
             #R2 = Phi0Vecs.T @ np.diag(dkappas * rp2_vs_q) @ Phi0Vecs
-            R1 = Phi0Vecs.T @ ((dkappas * rp1_vs_q)[:,np.newaxis] * Phi0Vecs) #This is much more efficient than building a huge diagonal matrix
-            R2 = Phi0Vecs.T @ ((dkappas * rp2_vs_q)[:,np.newaxis] * Phi0Vecs)
+            R1 = Phi0Vecs.T @ ((dkappas * rp1_vs_q)[:,np.newaxis] * np.array(Phi0Vecs)) #This is much more efficient than building a huge diagonal matrix
+            R2 = Phi0Vecs.T @ ((dkappas * rp2_vs_q)[:,np.newaxis] * np.array(Phi0Vecs))
             return R1, R2
 
         Nmodes = len(Phi0Vecs.T) # Row vectors of eigenfields
@@ -1093,7 +1101,6 @@ class EncodedEigenfields(object):
         self.Rmat2D_interp_sigma_r = {}
         self.Rmat2D_interp_sigma_i = {}
         pts = (qps_amp,qps_phase)
-        interp_kwargs = dict(s=0,kx=3,ky=3) # smoothing factor `s=1` is for interpolation, `kx` and `ky` are degrees of spline
         for i in range(self.Rmats2D_subs.shape[2]):
             for j in range(self.Rmats2D_subs.shape[2]):
                 inds = (i, j)

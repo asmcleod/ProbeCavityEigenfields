@@ -162,6 +162,7 @@ class VariationalMaterial2D(object):
             qp_vals = [qp_vals] * len(freqs)
         self.qp_vals = qp_vals
 
+        self.faddeeva_gamma_boost = 0.5
         self.set_coarse_params_eps(Nosc_eps, amp=amp_eps)
         self.set_coarse_params_qp(Nosc_qp, amp=amp_qp)
         self.set_fine_params_eps(Nosc_eps * 3, amp=amp_eps * 0.1)
@@ -229,10 +230,9 @@ class VariationalMaterial2D(object):
         self.qp_fine_amps = list(amp / (1 + np.arange(Nosc)))  # First will be offset
         df = np.max(self.freqs) - np.min(self.freqs)
         gamma = df/Nosc
-        gamma_boost=1.5
-        self.qp_fine_gammas = [gamma*gamma_boost] * Nosc  # Let's have an oscillator every `gamma`
-        self.qp_fine_freqs = np.linspace(np.min(self.freqs) - gamma/2,
-                                         np.max(self.freqs) + gamma/2,
+        self.qp_fine_gammas = [gamma*self.faddeeva_gamma_boost] * Nosc  # Let's have an oscillator every `gamma`
+        self.qp_fine_freqs = np.linspace(np.min(self.freqs),
+                                         np.max(self.freqs),
                                          Nosc)
         self.qp_faddeeva_basis = [self.faddeeva_oscillator((1,f0,gamma)) \
                                     for f0,gamma in zip(self.qp_fine_freqs,
@@ -245,8 +245,8 @@ class VariationalMaterial2D(object):
         gamma = df/Nosc
         gamma_boost=0.5
         self.eps_fine_gammas = [gamma*gamma_boost] * Nosc  # Let's have an oscillator every `gamma`
-        self.eps_fine_freqs = np.linspace(np.min(self.freqs) - gamma/2,
-                                          np.max(self.freqs) + gamma/2,
+        self.eps_fine_freqs = np.linspace(np.min(self.freqs),
+                                          np.max(self.freqs),
                                           Nosc)
         self.eps_faddeeva_basis = [self.faddeeva_oscillator((1,f0,gamma)) \
                                     for f0,gamma in zip(self.eps_fine_freqs,
@@ -291,21 +291,21 @@ class VariationalMaterial2D(object):
 
         # Take offset from first of coarse parameters
         params_coarse = copy.copy(list(self.qp_coarse_params))
-        eps2Dr = params_coarse.pop(0)
-        eps2Di = params_coarse.pop(0)
-        eps2D = eps2Dr + 1j * np.abs(eps2Di)
+        excess_eps2Dr = params_coarse.pop(0)
+        excess_eps2Di = params_coarse.pop(0)
+        excess_eps2D = excess_eps2Dr + 1j * np.abs(excess_eps2Di)
 
         # Coarse oscillators
-        eps2D += self.oscillators(params_coarse)
+        excess_eps2D += self.oscillators(params_coarse)
 
         # Fine oscillators (all fixed freq and gamma)
         eps2D_faddeeva = np.sum([amp*fad for amp,fad \
                                in zip(self.qp_fine_amps,self.qp_faddeeva_basis)],
                               axis=0)
-        eps2D += eps2D_faddeeva
-        eps2D = eps2D.real + 1j * np.abs(eps2D.imag)
+        excess_eps2D += eps2D_faddeeva
+        excess_eps2D = excess_eps2D.real + 1j * np.abs(excess_eps2D.imag)
 
-        qps = 1 / -eps2D # If eps2D==0, then qp will diverge (no polariton)
+        qps = 1 / -excess_eps2D # If excess_eps2D==0, then qp will diverge (no polariton)
         
         # Replace any infinities with maximum value
         qps = np.where(np.isinf(qps),\
