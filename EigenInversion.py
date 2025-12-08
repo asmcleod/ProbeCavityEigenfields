@@ -144,7 +144,7 @@ class InvertibleEigenfieldsPredictor(object):
 class VariationalMaterial2D(object):
 
     def __init__(self, Predictor, freqs,
-                 Nosc_eps=3, amp_eps=1,
+                 Nosc_eps=3, amp_eps=0, eps0=1,
                  Nosc_qp=3, amp_qp=0,
                  eps_vals=None,
                  qp_vals=None,
@@ -163,10 +163,10 @@ class VariationalMaterial2D(object):
         self.qp_vals = qp_vals
 
         self.faddeeva_gamma_boost = 0.5
-        self.set_coarse_params_eps(Nosc_eps, amp=amp_eps)
+        self.set_coarse_params_eps(Nosc_eps, amp=amp_eps, eps0=eps0)
         self.set_coarse_params_qp(Nosc_qp, amp=amp_qp)
-        self.set_fine_params_eps(Nosc_eps * 3, amp=amp_eps * 0.1)
-        self.set_fine_params_qp(Nosc_eps * 3, amp=amp_qp * 0.1)
+        self.set_fine_params_eps(Nosc_eps * 3, amp=amp_eps)
+        self.set_fine_params_qp(Nosc_eps * 3, amp=amp_qp)
 
         self.signal_mult = 1  # For qp fitting only
 
@@ -205,7 +205,6 @@ class VariationalMaterial2D(object):
         f0s = np.linspace(np.min(self.freqs) + gamma/2,
                           np.max(self.freqs) - gamma/2,
                           Nosc)
-        print(f0s)
 
         # First terms will be offset
         params = [np.real(eps0), np.abs(np.imag(eps0))] \
@@ -240,7 +239,7 @@ class VariationalMaterial2D(object):
 
     def set_fine_params_eps(self, Nosc, amp=0):
 
-        self.eps_fine_amps = list(amp / (1 + np.arange(Nosc)))  # First will be offset
+        self.eps_fine_amps = [amp]*Nosc
         df = np.max(self.freqs) - np.min(self.freqs)
         gamma = df/Nosc
         gamma_boost=0.5
@@ -254,7 +253,7 @@ class VariationalMaterial2D(object):
 
     param_names = ['eps_coarse_params',
                    'eps_fine_amps',
-                    'eps_faddeeva_basis',
+                   'eps_faddeeva_basis',
                    'qp_coarse_params',
                    'qp_fine_amps',
                    'qp_faddeeva_basis']
@@ -303,7 +302,7 @@ class VariationalMaterial2D(object):
                                in zip(self.qp_fine_amps,self.qp_faddeeva_basis)],
                               axis=0)
         excess_eps2D += eps2D_faddeeva
-        excess_eps2D = excess_eps2D.real + 1j * np.abs(excess_eps2D.imag)
+        #excess_eps2D = excess_eps2D.real + 1j * np.abs(excess_eps2D.imag)
 
         qps = 1 / -excess_eps2D # If excess_eps2D==0, then qp will diverge (no polariton)
         
@@ -332,7 +331,7 @@ class VariationalMaterial2D(object):
                               axis=0)
 
         eps += eps_faddeeva
-        eps = eps.real + 1j * np.abs(eps.imag)
+        #eps = eps.real + 1j * np.abs(eps.imag)
 
         return eps
 
@@ -388,7 +387,9 @@ class VariationalMaterial2D(object):
         S_preds = self.predict()
         S_targets = S_targets_r + 1j * S_targets_i
 
-        Rs = (np.abs(S_preds - S_targets) / S_targets_std) ** exp
+        certainty =  1 - np.abs(S_targets_std / S_targets)
+        certainty = np.where(certainty>0,certainty,0)
+        Rs = np.abs(S_preds - S_targets) ** exp * certainty
         self.R = np.sum(Rs)  # Store a metric for us to inspect later
         if self.print_residual: print(self.R)
 
@@ -403,16 +404,10 @@ class VariationalMaterial2D(object):
             self.eps_fine_amps = params
 
         elif self.optimize_target == 'qp_coarse':
-            if self.optimize_signal_mult:
-                self.signal_mult = params[0]
-                self.qp_coarse_params = params[1:]
-            else: self.qp_coarse_params = params
+            self.qp_coarse_params = params
 
         elif self.optimize_target == 'qp_fine':
-            if self.optimize_signal_mult:
-                self.signal_mult = params[0]
-                self.qp_fine_amps = params[1:]
-            else: self.qp_fine_amps = params
+            self.qp_fine_amps = params
 
         else:
             raise ValueError('optimize target must be one of %s!' \
@@ -427,14 +422,10 @@ class VariationalMaterial2D(object):
             params = self.eps_fine_amps
 
         elif self.optimize_target == 'qp_coarse':
-            if self.optimize_signal_mult: params = [self.signal_mult]
-            else: params=[]
-            params += list(self.qp_coarse_params)
+            params = list(self.qp_coarse_params)
 
         elif self.optimize_target == 'qp_fine':
-            if self.optimize_signal_mult: params = [self.signal_mult]
-            else: params=[]
-            params += list(self.qp_fine_amps)
+            params = list(self.qp_fine_amps)
 
         else:
             raise ValueError('optimize target must be one of %s!' \
@@ -447,10 +438,7 @@ class VariationalMaterial2D(object):
                  factor=1, full_output=False, xtol=1e-3, ftol=1e-3,
                  randomization=1e-3, exit_criterion=1e-3,
                  plot_residuals=False,
-                 optimize_signal_mult=False,
                  **kwargs):
-
-        self.optimize_signal_mult = optimize_signal_mult
 
         S_targets = np.array(S_targets) # Make array type, so there is no AWA nonsense to slow us down
         S_targets_r = S_targets.real
@@ -489,9 +477,6 @@ class VariationalMaterial2D(object):
                                      factor=factor, full_output=full_output, xtol=xtol, ftol=ftol,
                                      **kwargs)[0]
                     self.attach_params(params)
-
-                    if self.optimize_signal_mult:
-                        print('Optimized signal_mult =', self.signal_mult)
 
                     # Examine the result
                     print('R=%1.2f; time elapsed (s) in cycle: %1.2f' % (self.R, time.time() - t0))
@@ -574,3 +559,359 @@ class VariationalMaterial2D(object):
         # Now use the fact that `d(1/qp) = -dq/qp**2` to get a `deps` for 2D
 
         return deps, dqp
+
+#################################################################################
+# ---- Tools for point-by-point fitting of target spectra
+#################################################################################
+
+def Fit_eps_PointByPoint(S_targets, target_fs,
+                        Predictor, eps_guess,
+                        S_targets_uncertainty=.01,
+                        exp=1, plot=True,
+                        **leastsq_kwargs):
+    # Define the residual function for this optimizer
+    def PbP_eps_residual(params, *args):
+
+        eps_real, eps_imag = params
+        eps = eps_real + 1j * eps_imag
+        S_target_real, S_target_imag, Predictor, qp, exp = args
+
+        S_target = S_target_real + 1j * S_target_imag
+        prediction = Predictor(qp, eps)
+
+        to_minimize = [np.abs(np.real(prediction - S_target)) ** exp,
+                       np.abs(np.imag(prediction - S_target)) ** exp]
+
+        return to_minimize
+
+    # Holders for the results
+    epss_pred = []  # We will fill this with predicted `q_p` values at each frequency
+    Ss_pred = []
+    Ss_pred2 = []
+
+    # Loop over frequencies and target values, find matching permittivity at each
+    t0 = time.time()
+    qp = 1e20  # A qp value big enough to turn off 2D material
+    eps_pred = eps_guess  # This is an initial guess to get the nonlinear fitting started
+    deps = 1e-2  # An infinitessimal permittivity for computing variation of output to input
+
+    for freq, S_target in zip(target_fs, S_targets):
+        t0 = time.time()
+
+        # Set up parameters for this optimization
+        x0 = (eps_pred.real, eps_pred.imag)
+        args = (S_target.real, S_target.imag, Predictor, qp, exp)
+
+        # Run optimization
+        result = leastsq(PbP_eps_residual, x0, args=args,
+                         **leastsq_kwargs)[0]
+        print('freq=%1.2f' % freq, '; Elapsed: %1.3f' % (time.time() - t0),
+              end='\r', flush=True)
+        eps_pred = result[0] + 1j * result[1]
+
+        # Store result
+        epss_pred.append(eps_pred)
+        Ss_pred.append(Predictor(qp, eps_pred))
+        Ss_pred2.append(Predictor(qp, eps_pred + deps))
+
+    print('Elapsed:', time.time() - t0)
+
+    epss_pred = np.array(epss_pred)
+    Ss_pred = np.array(Ss_pred)
+    Ss_pred2 = np.array(Ss_pred2)
+    dSdeps = (Ss_pred2 - Ss_pred) / deps
+    Delta_eps = np.abs(S_targets_uncertainty / dSdeps)
+
+    result = dict(eps_predicted=epss_pred, S_predicted=Ss_pred)
+
+    if plot:
+        plt.figure()
+        plt.plot(target_fs, np.abs(S_targets), label='target')
+        plt.plot(target_fs, np.abs(Ss_pred), label='point-by-point fit')
+        plt.title('Near-field signal from point-by-point fit')
+        plt.legend()
+        plt.xlabel(r'Frequency (cm$^{-1}$)')
+
+        plt.figure()
+        plt.plot(target_fs, epss_pred.real, label='Real', color='b')
+        plt.fill_between(target_fs,
+                         epss_pred.real - Delta_eps / 2,
+                         epss_pred.real + Delta_eps / 2,
+                         alpha=.1, color='b')
+        plt.plot(target_fs, epss_pred.imag, label='Imag', color='r')
+        plt.fill_between(target_fs,
+                         epss_pred.imag - Delta_eps / 2,
+                         epss_pred.imag + Delta_eps / 2,
+                         alpha=.1, color='r')
+        plt.title(r'$\varepsilon_\mathrm{subs}$ from point-by-point fit')
+        plt.legend()
+        plt.xlabel(r'Frequency (cm$^{-1}$)')
+
+    return result
+
+
+def FitPbP_eps_to_oscillators(eps_target, target_fs,
+                            MaterialModel, Nosc, amp, eps0, exp=1,
+                            reset_MaterialModel=True, **leastsq_kwargs):
+    # Define the residual function for this oscillator
+    def oscillator_eps_residual(args,
+                                *extra_args):
+        eps_target_real, eps_target_imag, MaterialModel, exp = extra_args
+        MaterialModel.optimize_target = 'eps_coarse'
+
+        params = args
+        # print(params)
+        MaterialModel.attach_params(params)
+
+        eps_target = eps_target_real + 1j * eps_target_imag
+        eps_smooth = MaterialModel.get_epss()
+
+        to_minimize = np.abs(eps_target - eps_smooth) ** exp
+
+        return to_minimize
+
+    if reset_MaterialModel:
+        MaterialModel.set_coarse_params_eps(Nosc=Nosc, amp=amp, eps0=eps0)
+        MaterialModel.set_fine_params_eps(Nosc=len(eps_target), amp=0)
+
+    args = (eps_target.real, eps_target.imag, MaterialModel, exp)
+
+    MaterialModel.optimize_target = 'eps_coarse'
+    x0 = MaterialModel.detach_params()
+    to_minimize = oscillator_eps_residual(x0, *args)
+    print('Residual before fitting:', np.sum(to_minimize))
+
+    plt.figure()
+    eps_smooth = MaterialModel.get_epss()
+    plt.plot(target_fs, np.array(eps_target).real, ls='--', label='point-by-point target', color='b')
+    plt.plot(target_fs, np.array(eps_target).imag, ls='--', color='r')
+    plt.plot(target_fs, np.array(eps_smooth).real, ls='-', label='smooth fit', color='b')
+    plt.plot(target_fs, np.array(eps_smooth).imag, ls='-', color='r')
+    plt.legend()
+    plt.title('Permittivities before fitting')
+    plt.xlabel(r'Frequency (cm$^{-1}$)')
+
+    t0 = time.time()
+    result = leastsq(oscillator_eps_residual, x0, args=(eps_target.real, eps_target.imag, \
+                                                        MaterialModel, exp),
+                     **leastsq_kwargs)[0]
+    MaterialModel.attach_params(result)
+
+    print('Elapsed: %1.3f' % (time.time() - t0))
+
+    MaterialModel.optimize_target = 'eps_coarse'
+    x0 = MaterialModel.detach_params()
+    to_minimize = oscillator_eps_residual(x0, *args)
+    print('Residual after fitting:', np.sum(to_minimize))
+
+    plt.figure()
+    eps_smooth = MaterialModel.get_epss()
+    plt.plot(target_fs, np.array(eps_target).real, ls='--', label='point-by-point target', color='b')
+    plt.plot(target_fs, np.array(eps_target).imag, ls='--', color='r')
+    plt.plot(target_fs, np.array(eps_smooth).real, ls='-', label='smooth fit', color='b')
+    plt.plot(target_fs, np.array(eps_smooth).imag, ls='-', color='r')
+    plt.legend()
+    plt.title('Permittivities after fitting')
+    plt.xlabel(r'Frequency (cm$^{-1}$)')
+
+    return eps_smooth
+
+def Fit_qp_PointByPoint(S_targets, target_fs,
+                       Predictor, epss, qp_guess,
+                       S_targets_uncertainty=.01, exp=1, plot=True,
+                       **leastsq_kwargs):
+    # Define residual function
+    def PbP_qp_residual(params, *args):
+
+        qp_real, qp_imag = params
+        qp = qp_real + 1j * np.abs(qp_imag)  # qp must have positive imaginary part
+        S_target_real, S_target_imag, Predictor, eps, exp = args
+
+        S_target = S_target_real + 1j * S_target_imag
+        prediction = Predictor(qp, eps)
+
+        to_minimize = [np.abs(np.real(prediction - S_target)) ** exp,
+                       np.abs(np.imag(prediction - S_target)) ** exp]
+
+        return to_minimize
+
+    # Predictor should give signal from (2D+substrate) relative to (substrate)
+    qp0 = 1e24
+    Predictor_subs_norm = lambda qp, eps: Predictor(qp, eps) / Predictor(qp0, eps)
+
+    # Holders for point-by-point parameters
+    qps_pred = []  # We will fill this with predicted `q_p` values at each frequency
+    dqps = []
+    qp_pred = qp_guess  # This is an initial guess to get the nonlinear fitting started
+    Ss_pred = []
+    Ss_pred2 = []
+
+    # For each frequency and substrate permittivity, add a qp to match the target
+    t0 = time.time()
+    for freq, eps, S_target in zip(target_fs, epss, S_targets):
+        t1 = time.time()
+
+        # Update the guess qp and arguments to fit
+        x0 = (qp_pred.real, qp_pred.imag)
+        args = (S_target.real, S_target.imag, Predictor_subs_norm, eps, exp)
+
+        # Run optimization
+        result = leastsq(PbP_qp_residual, x0, args=args,
+                         **leastsq_kwargs)[0]
+        print('freq=%1.2f' % freq, '; Elapsed: %1.3f' % (time.time() - t1),
+              end='\r', flush=True)
+        qp_pred = result[0] + 1j * result[1]
+
+        # Store the results
+        qps_pred.append(qp_pred)
+        dqp = qp_pred * .001
+        dqps.append(dqp)
+        Ss_pred.append(Predictor_subs_norm(qp_pred, eps))
+        Ss_pred2.append(Predictor_subs_norm(qp_pred + dqp, eps))
+
+    print('Elapsed:', time.time() - t0)
+
+    # Estimate qps uncertainty based on targets uncertainty
+    qps_pred = np.array(qps_pred)
+    qps_pred = qps_pred.real + 1j * np.abs(qps_pred.imag)  # qp must have positive imaginary part
+    Ss_pred = np.array(Ss_pred)
+    Ss_pred2 = np.array(Ss_pred2)
+    dqps = np.array(dqps)
+    dSdqp_pred = (Ss_pred2 - Ss_pred) / dqps
+    Delta_qps = np.abs(S_targets_uncertainty / dSdqp_pred)
+    Delta_eps2D = np.abs(Delta_qps / qps_pred ** 2)
+
+    if plot:
+        # Plot whether we matched the target
+        plt.figure()
+        plt.plot(target_fs, np.abs(S_targets), label='target', color='b', ls='--')
+        plt.plot(target_fs, np.abs(Ss_pred), label='point-by-point fit', color='b')
+        plt.ylabel('Amplitude', color='b')
+        plt.legend()
+        plt.twinx()
+        plt.plot(target_fs, np.angle(S_targets), color='r', ls='--')
+        plt.plot(target_fs, np.angle(Ss_pred), color='r')
+        plt.ylabel('Phase', color='r')
+        plt.title('Near-field signal from point-by-point fit')
+
+        # Plot the output of the fit with uncertainty
+        plt.figure()
+        eps2D = -1 / qps_pred
+        plt.plot(target_fs, eps2D.real, label='Real', color='b')
+        plt.fill_between(target_fs, \
+                         eps2D.real - Delta_eps2D / 2,
+                         eps2D.real + Delta_eps2D / 2,
+                         label='Real', color='b', alpha=.1)
+        plt.plot(target_fs, eps2D.imag, label='Imag', color='r')
+        plt.fill_between(target_fs, \
+                         eps2D.imag - Delta_eps2D / 2,
+                         eps2D.imag + Delta_eps2D / 2,
+                         label='Imag', color='r', alpha=.1)
+        plt.title(r'$-1/q_p$ from point-by-point fit')
+        plt.legend()
+
+    result = dict(qp_predicted=qps_pred, S_predicted=Ss_pred,
+                  Delta_qps=Delta_qps, Delta_eps2D=Delta_eps2D)
+
+    return result
+
+
+def Fit_PbP_qp_to_oscillators(qp_target, target_fs,
+                               MaterialModel, Nosc, amp, eps0, exp=1,
+                               qpinv_target_uncertainties=None,
+                               reset_MaterialModel=True, plot=True,
+                               **leastsq_kwargs):
+    # Define residual function
+    def oscillator_qp_residual(params, *args):
+
+        qp_target_real, qp_target_imag, MaterialModel, exp, certainty = args
+        MaterialModel.optimize_target = 'qp_coarse'
+        MaterialModel.attach_params(params)
+
+        qp_target = qp_target_real + 1j * qp_target_imag
+        qpinv_target = -1 / qp_target
+        qp_smooth = MaterialModel.get_qps()
+        qpinv_smooth = -1 / qp_smooth
+
+        to_minimize = np.abs(qpinv_target - qpinv_smooth) ** exp * certainty
+
+        return to_minimize
+
+    # Set the MaterialModel to a blank slate, since we're finding new oscillators
+    if reset_MaterialModel:
+        MaterialModel.set_coarse_params_qp(Nosc=Nosc, amp=amp, eps0=eps0)
+        MaterialModel.set_fine_params_qp(Nosc=len(qp_target), amp=0)
+
+    # Make sure the qp is absorptive
+    qpinv_target = -1 / qp_target
+    qpinv_target = qpinv_target.real + 1j * np.abs(qpinv_target)
+    qp_target = -1 / qpinv_target
+
+    # Compute certainty and set up arguments to residual
+    if qpinv_target_uncertainties is None:
+        certainty = 1
+    else:
+        certainty = 1 - np.abs(qpinv_target_uncertainties) / np.abs(qpinv_target)
+        certainty = np.where(certainty > 0, certainty, 0)
+    args = (qp_target.real, qp_target.imag, MaterialModel, exp, certainty)
+
+    # Report state of affairs before any fitting
+    MaterialModel.optimize_target = 'qp_coarse'
+    x0 = MaterialModel.detach_params()
+    to_minimize = oscillator_qp_residual(x0, *args)
+    print('Residual before fitting:', np.sum(to_minimize))
+
+    if plot:
+        # Plot Fit before fitting
+        plt.figure()
+        qp_smooth = MaterialModel.get_qps()
+        eps2D_target = -1 / qp_target
+        plt.plot(target_fs, eps2D_target.real, ls='--', label='point-by-point target', color='b')
+        plt.fill_between(target_fs,
+                         eps2D_target.real - qpinv_target_uncertainties / 2,
+                         eps2D_target.real + qpinv_target_uncertainties / 2,
+                         color='b', alpha=.1)
+        plt.plot(target_fs, eps2D_target.imag, ls='--', color='r')
+        plt.fill_between(target_fs,
+                         eps2D_target.imag - qpinv_target_uncertainties / 2,
+                         eps2D_target.imag + qpinv_target_uncertainties / 2,
+                         color='r', alpha=.1)
+        eps2D_smooth = -1 / qp_smooth
+        plt.plot(target_fs, eps2D_smooth.real, ls='-', label='smooth fit', color='b')
+        plt.plot(target_fs, eps2D_smooth.imag, ls='-', label='Imag', color='r')
+        plt.legend()
+        plt.title(r'$-1/q_p$ values before fitting')
+
+    # Perform optimization
+    t0 = time.time()
+    result = leastsq(oscillator_qp_residual, x0, args=args,
+                     **leastsq_kwargs)[0]
+    print('Elapsed: %1.3f' % (time.time() - t0))
+    MaterialModel.attach_params(result)
+
+    x0 = MaterialModel.detach_params()
+    to_minimize = oscillator_qp_residual(x0, *args)
+    print('Residual after fitting:', np.sum(to_minimize))
+
+    # Plot Fit after fitting
+    if plot:
+        plt.figure()
+        qp_smooth = MaterialModel.get_qps()
+        eps2D_target = -1 / qp_target
+        plt.plot(target_fs, eps2D_target.real, ls='--', label='point-by-point target', color='b')
+        plt.fill_between(target_fs,
+                         eps2D_target.real - qpinv_target_uncertainties / 2,
+                         eps2D_target.real + qpinv_target_uncertainties / 2,
+                         color='b', alpha=.1)
+        plt.plot(target_fs, eps2D_target.imag, ls='--', color='r')
+        plt.fill_between(target_fs,
+                         eps2D_target.imag - qpinv_target_uncertainties / 2,
+                         eps2D_target.imag + qpinv_target_uncertainties / 2,
+                         color='r', alpha=.1)
+        eps2D_smooth = -1 / qp_smooth
+        plt.plot(target_fs, eps2D_smooth.real, ls='-', label='smooth fit', color='b')
+        plt.plot(target_fs, eps2D_smooth.imag, ls='-', label='Imag', color='r')
+        plt.legend()
+        plt.title(r'$-1/q_p$ values before fitting')
+
+    return qp_smooth
