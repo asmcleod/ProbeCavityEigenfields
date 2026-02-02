@@ -15,20 +15,30 @@ from common.baseclasses import AWA
 import ProbeCavityEigenfields as PCE
 from ProbeCavityEigenfields import ProbeSpectroscopy as PS
 
+# Everyone will share this definition of qp corresponding to zero 2D conductivity
+qpmax=1e30*(1+1j)
 
-class EncodedEigenfieldsPredictor(object):
-
+class EncodedEigenfieldsPredictor(PCE.SlenderizeSerialization):
     """Simple predictor callable as `Predictor(qp,eps)` that will delivery a normalized signal
     as quickly as possible using the information from a `PS.EncodedEigenfields` instance."""
 
-    def __init__(self, EncodedEigenfields,
+    #----- Saving / loading
+
+    filename_template = '(%s)_InvertibleEigenfieldsPredictor.pickle'
+
+    attrs_to_serialize = {'Probe': PCE.Probe,
+                          'EncodedEigenfields':PS.EncodedEigenfields}
+
+    #---- Initialization
+
+    def __init__(self, encoded_eigenfields,
                  zmin=.1, A=2, Nts=24,
                  harmonic=2,
                  qp_ref=1e8,
                  eps_ref=1e8,
                  Nmodes=15):
 
-        assert isinstance(EncodedEigenfields,PS.EncodedEigenfields)
+        assert isinstance(encoded_eigenfields, PS.EncodedEigenfields)
 
         # Demodulation quadrature nodes (and weights) in time
         self.ts, self.dts = numrec.GetQuadrature(N=Nts, xmin=-.5, xmax=0,
@@ -38,12 +48,14 @@ class EncodedEigenfieldsPredictor(object):
 
         # Corresponding gap heights
         self.at_gaps = zmin + A * (1 + np.cos(2 * np.pi * self.ts))
-        self.freq = EncodedEigenfields.get_probe().get_freq()
-        self.EncodedEigenfields = EncodedEigenfields
+        self.freq = encoded_eigenfields.get_probe().get_freq()
+        self.EncodedEigenfields = encoded_eigenfields
         self.Nmodes = Nmodes
         self.Sref = self.set_Sref(qp_ref, eps_ref)
 
         self.is_vectorized = False # The `compute_signal` attribute is NOT vectorized for this Predictor
+
+    def get_probe(self): return self.EncodedEigenfields.get_probe()
 
     def massage_arg(self, arg):  # Assume argument must have positive imaginary
 
@@ -83,16 +95,25 @@ class EncodedEigenfieldsPredictor(object):
 
         return self.compute_norm_signal(*args, **kwargs)
 
-class InvertibleEigenfieldsPredictor(object):
+class InvertibleEigenfieldsPredictor(PCE.SlenderizeSerialization):
     """Simple predictor callable as `Predictor(qp,eps)` that will delivery a normalized signal
     as quickly as possible using the information from a `PS.EncodedEigenfields` instance."""
 
-    def __init__(self, InvertibleEigenfields,
+    #----- Saving / loading
+
+    filename_template = '(%s)_InvertibleEigenfieldsPredictor.pickle'
+
+    attrs_to_serialize = {'Probe': PCE.Probe,
+                          'InvertibleEigenfields':PS.InvertibleEigenfields}
+
+    #---- Initialization
+
+    def __init__(self, invertible_eigenfields,
                  zmin=.1, A=2, Nts=24,
                  harmonic=2,
                  eps_ref=1e8,
                  Nmodes=20):
-        assert isinstance(InvertibleEigenfields, PS.InvertibleEigenfields)
+        assert isinstance(invertible_eigenfields, PS.InvertibleEigenfields)
 
         # Demodulation quadrature nodes (and weights) in time
         self.ts, self.dts = numrec.GetQuadrature(N=Nts, xmin=-.5, xmax=0,
@@ -101,14 +122,16 @@ class InvertibleEigenfieldsPredictor(object):
         self.kernel -= np.mean(self.kernel)
 
         # Corresponding gap heights
-        self.nodes = InvertibleEigenfields.get_demodulation_nodes(zmin=zmin, amplitude=A, quadrature=numrec.GL,
-                                                                  harmonic=harmonic, Nts=Nts)
-        self.freq = InvertibleEigenfields.get_probe().get_freq()
-        self.InvertibleEigenfields = InvertibleEigenfields
+        self.nodes = invertible_eigenfields.get_demodulation_nodes(zmin=zmin, amplitude=A, quadrature=numrec.GL,
+                                                                   harmonic=harmonic, Nts=Nts)
+        self.freq = invertible_eigenfields.get_probe().get_freq()
+        self.InvertibleEigenfields = invertible_eigenfields
         self.Nmodes=Nmodes
         self.Sref = self.set_Sref(eps_ref)
 
         self.is_vectorized = True # The `compute_signal` attribute is indeed vectorized for this Predictor
+
+    def get_probe(self): return self.InvertibleEigenfields.get_probe()
 
     def massage_arg(self, arg):  # Assume argument must have positive imaginary
 
@@ -141,7 +164,15 @@ class InvertibleEigenfieldsPredictor(object):
     def __call__(self, *args, **kwargs):
         return self.compute_norm_signal(*args, **kwargs)
 
-class VariationalMaterial2D(object):
+class VariationalMaterial2D(PCE.SlenderizeSerialization):
+
+    #----- Saving / loading
+
+    attrs_to_serialize = {'Probe': PCE.Probe}
+
+    def get_probe(self): return self.Predictor.get_probe()
+
+    #---- Initialization
 
     def __init__(self, Predictor, freqs,
                  Nosc_eps=3, amp_eps=0, eps0=1,
@@ -151,6 +182,8 @@ class VariationalMaterial2D(object):
                  additional_normalization=None):
 
         self.Predictor = Predictor
+        self.attrs_to_serialize['Predictor'] = type(Predictor)
+
         self.freqs = freqs
         self.R = None
         self.print_residual = False
@@ -168,7 +201,10 @@ class VariationalMaterial2D(object):
         self.set_fine_params_eps(Nosc_eps * 3, amp=amp_eps)
         self.set_fine_params_qp(Nosc_eps * 3, amp=amp_qp)
 
-        self.signal_mult = 1  # For qp fitting only
+        self.qp_signal_mult = None
+        self.qp_signal_phase_factor = None
+        self.eps_signal_mult = None
+        self.eps_signal_phase_factor = None
 
         self.optimize_target = 'eps_coarse'
         self.optimize_target_options = ['eps_coarse',
@@ -176,8 +212,6 @@ class VariationalMaterial2D(object):
                                         'qp_coarse',
                                         'qp_fine']
         self.additional_normalization = additional_normalization
-
-        self.qpmax=1e12 # qp will never be allowed to exceed this value
 
         self.interrupt_error = False # Make this True to enable raising error upon keyboard interrupt during optimization
 
@@ -254,9 +288,13 @@ class VariationalMaterial2D(object):
     param_names = ['eps_coarse_params',
                    'eps_fine_amps',
                    'eps_faddeeva_basis',
+                   'eps_signal_mult',
+                   'eps_signal_phase_factor',
                    'qp_coarse_params',
                    'qp_fine_amps',
-                   'qp_faddeeva_basis']
+                   'qp_faddeeva_basis',
+                   'qp_signal_mult',
+                   'qp_signal_phase_factor']
 
     def get_params(self):
 
@@ -277,6 +315,7 @@ class VariationalMaterial2D(object):
         all_osc = (0 + 0j) * f
         for i in range(int(Nosc)):
             amp, f0, gamma = params[3 * i:3 * (i + 1)]
+            #f0 = np.abs(f0) # Somehow enabling this (which is proper) breaks the smoothness of leastsq and gets it stuck.
             amp = np.abs(amp)
             gamma = np.abs(gamma) * np.sqrt(2)
             osc = amp * f0 * gamma / (f0 ** 2 - f ** 2 - 1j * f * gamma)  # Non-gainful oscillators
@@ -292,7 +331,7 @@ class VariationalMaterial2D(object):
         params_coarse = copy.copy(list(self.qp_coarse_params))
         excess_eps2Dr = params_coarse.pop(0)
         excess_eps2Di = params_coarse.pop(0)
-        excess_eps2D = excess_eps2Dr + 1j * np.abs(excess_eps2Di)
+        excess_eps2D = excess_eps2Dr + 1j * np.abs(excess_eps2Di) # Enforce positive imaginary part of permittivity
 
         # Coarse oscillators
         excess_eps2D += self.oscillators(params_coarse)
@@ -302,13 +341,14 @@ class VariationalMaterial2D(object):
                                in zip(self.qp_fine_amps,self.qp_faddeeva_basis)],
                               axis=0)
         excess_eps2D += eps2D_faddeeva
-        #excess_eps2D = excess_eps2D.real + 1j * np.abs(excess_eps2D.imag)
+        excess_eps2D = excess_eps2D.real + 1j * np.abs(excess_eps2D.imag) # Enforce positive imaginary part of permittivity
 
         qps = 1 / -excess_eps2D # If excess_eps2D==0, then qp will diverge (no polariton)
         
         # Replace any infinities with maximum value
+        global qpmax
         qps = np.where(np.isinf(qps),\
-                       self.qpmax,qps)
+                       qpmax,qps)
         
         return qps
 
@@ -320,7 +360,7 @@ class VariationalMaterial2D(object):
         params_coarse = copy.copy(list(self.eps_coarse_params))
         epsr = params_coarse.pop(0)
         epsi = params_coarse.pop(0)
-        eps = epsr + 1j * np.abs(epsi)
+        eps = epsr + 1j * np.abs(epsi) # Enforce positive imaginary part of permittivity
 
         # Coarse oscillators
         eps += self.oscillators(params_coarse)
@@ -331,7 +371,7 @@ class VariationalMaterial2D(object):
                               axis=0)
 
         eps += eps_faddeeva
-        #eps = eps.real + 1j * np.abs(eps.imag)
+        eps = eps.real + 1j * np.abs(eps.imag) # Enforce positive imaginary part of permittivity
 
         return eps
 
@@ -347,20 +387,36 @@ class VariationalMaterial2D(object):
     def unfix_epss(self):
         self.eps_vals = None
 
-    def get_signal_mult(self, signal_mult_min=0.75):
+    def rescale_signal(self, signal, delta_S=.2, delta_phase=.2, qps_enabled=False):
+
+        scaler = lambda x,A:  A*np.tanh(x) # can range from 1-A to 1+A
 
         # map the interval [-infty,infty] to [min,infty]
         # while mapping 1 to 1
-        x = self.signal_mult
-        signal_mult_actual = signal_mult_min + (1 - signal_mult_min) * np.exp(0.1 * (x - 1))
+        signal_mult_actual = 1
+        if qps_enabled:
+            x,y = self.qp_signal_mult, self.qp_signal_phase_factor
+        else:
+            x, y = self.eps_signal_mult, self.eps_signal_phase_factor
 
-        return signal_mult_actual
+        if x is not None:
+            scaling = 1+scaler(x,A=delta_S)
+            signal_mult_actual = signal_mult_actual * scaling
+        if y is not None:
+            dPhi = scaler(y,A=delta_phase)
+            phase_factor = np.exp(1j*dPhi*self.freqs/np.mean(self.freqs))
+            signal_mult_actual = signal_mult_actual * phase_factor
+
+        #print(signal_mult_actual)
+
+        return signal * signal_mult_actual
 
     def predict(self, eps_offset=None, qp_offset=None, qps_enabled=True):
 
+        global qpmax
         epss = self.get_epss()  # Whether hard-coded or targeted for fit, now get the values for evaluation
         if qps_enabled: qps = self.get_qps()  # Whether hard-coded or targeted for fit, now get the values for evaluation
-        else: qps = [self.qpmax for eps in epss]
+        else: qps = [qpmax for eps in epss]
 
         if eps_offset: epss *= (1 + eps_offset)
         if qp_offset: qps *= (1 + qp_offset)
@@ -369,8 +425,8 @@ class VariationalMaterial2D(object):
         else: S_preds = [self.Predictor(qp=qp, eps=eps) for qp, eps in zip(qps, epss)]
         S_preds = np.array(S_preds)
 
-        if qps_enabled:
-            S_preds = S_preds * self.get_signal_mult()
+        # Rescale signal with overall multiplication factor and/or phase scaling, if scales parameters are provided
+        S_preds = self.rescale_signal(S_preds,qps_enabled=qps_enabled)
 
         if self.additional_normalization is not None:
             S_preds /= self.additional_normalization
@@ -382,14 +438,16 @@ class VariationalMaterial2D(object):
 
         #assert len(S_targets_r) == len(self.freqs)
         assert self.eps_vals is None or self.qp_vals is None, 'Nothing to optimize!'
-
         self.attach_params(params)
-        S_preds = self.predict()
-        S_targets = S_targets_r + 1j * S_targets_i
 
+        S_preds = self.predict(qps_enabled=True)
+
+        S_targets = S_targets_r + 1j * S_targets_i
         certainty =  1 - np.abs(S_targets_std / S_targets)
         certainty = np.where(certainty>0,certainty,0)
+
         Rs = np.abs(S_preds - S_targets) ** exp * certainty
+
         self.R = np.sum(Rs)  # Store a metric for us to inspect later
         if self.print_residual: print(self.R)
 
@@ -397,14 +455,16 @@ class VariationalMaterial2D(object):
 
     def attach_params(self, params):
 
+        params = list(params)
+
         if self.optimize_target == 'eps_coarse':
             self.eps_coarse_params = params
 
-        elif self.optimize_target == 'eps_fine':
-            self.eps_fine_amps = params
-
         elif self.optimize_target == 'qp_coarse':
             self.qp_coarse_params = params
+
+        elif self.optimize_target == 'eps_fine':
+            self.eps_fine_amps = params
 
         elif self.optimize_target == 'qp_fine':
             self.qp_fine_amps = params
@@ -413,16 +473,33 @@ class VariationalMaterial2D(object):
             raise ValueError('optimize target must be one of %s!' \
                              % self.optimize_target_options)
 
+        if 'eps' in self.optimize_target:
+            # print(self.eps_coarse_params)
+            if self.eps_signal_mult is not None:
+                # print('Received an optimized `signal_mult_eps` of %1.2G.' % self.eps_signal_mult)
+                self.eps_signal_mult = params.pop(-1)
+            if self.eps_signal_phase_factor is not None:
+                # print('Received an optimized `signal_phase_factor_eps` of %1.2G.' % self.eps_signal_phase_factor)
+                self.eps_signal_phase_factor = params.pop(-1)
+
+        elif 'qp' in self.optimize_target:
+            if self.qp_signal_mult is not None:
+                #print('Received an optimized `signal_mult_qp` of %1.2G.' % self.qp_signal_mult)
+                self.qp_signal_mult = params.pop(-1)
+            if self.qp_signal_phase_factor is not None:
+                #print('Received an optimized `signal_phase_factor_qp` of %1.2G.' % self.qp_signal_phase_factor)
+                self.qp_signal_phase_factor = params.pop(-1)
+
     def detach_params(self):
 
         if self.optimize_target == 'eps_coarse':
-            params = self.eps_coarse_params
-
-        elif self.optimize_target == 'eps_fine':
-            params = self.eps_fine_amps
+            params = list(self.eps_coarse_params)
 
         elif self.optimize_target == 'qp_coarse':
             params = list(self.qp_coarse_params)
+
+        elif self.optimize_target == 'eps_fine':
+            params = list(self.eps_fine_amps)
 
         elif self.optimize_target == 'qp_fine':
             params = list(self.qp_fine_amps)
@@ -430,6 +507,23 @@ class VariationalMaterial2D(object):
         else:
             raise ValueError('optimize target must be one of %s!' \
                              % self.optimize_target_options)
+
+        if 'eps' in self.optimize_target:
+            if self.eps_signal_phase_factor is not None:
+                print('Optimizing `signal_phase_factor_eps` starting with value %1.2G.' % self.eps_signal_phase_factor)
+                params.append(self.eps_signal_phase_factor)
+            if self.eps_signal_mult is not None:
+                print('Optimizing `signal_mult_eps` starting with value %1.2G.' % self.eps_signal_mult)
+                params.append(self.eps_signal_mult)
+
+        elif 'qp' in self.optimize_target:
+            if self.qp_signal_phase_factor is not None:
+                print('Optimizing `signal_phase_factor_qp` starting with value %1.2G.' % self.qp_signal_phase_factor)
+                params.append(self.qp_signal_phase_factor)
+            if self.qp_signal_mult is not None:
+                print('Optimizing `signal_mult_qp` starting with value %1.2G.' % self.qp_signal_mult)
+                params.append(self.qp_signal_mult)
+
         return params
 
     def optimize(self, S_targets, S_targets_std=None,
@@ -471,8 +565,7 @@ class VariationalMaterial2D(object):
                     t0 = time.time()
                     params0 = self.detach_params()  # Whatever is stored will be our initial guess
                     params0 *= (1 + randomization * np.random.randn(len(params0)))
-                    params = leastsq(self.residual,
-                                     params0,
+                    params = leastsq(self.residual,params0,
                                      args=(S_targets_r, S_targets_i, S_targets_std),
                                      factor=factor, full_output=full_output, xtol=xtol, ftol=ftol,
                                      **kwargs)[0]
@@ -509,36 +602,36 @@ class VariationalMaterial2D(object):
     def optimize_eps_coarse(self, *args, **kwargs):
 
         self.fix_qps()
+        self.unfix_epss()
         self.optimize_target = 'eps_coarse'
         result = self.optimize(*args, **kwargs)
-        self.unfix_qps()
 
         return result
 
     def optimize_qp_coarse(self, *args, **kwargs):
 
         self.fix_epss()
+        self.unfix_qps()
         self.optimize_target = 'qp_coarse'
         result = self.optimize(*args, **kwargs)
-        self.unfix_epss()
 
         return result
 
     def optimize_eps_fine(self, *args, **kwargs):
 
         self.fix_qps()
+        self.unfix_epss()
         self.optimize_target = 'eps_fine'
         result = self.optimize(*args, **kwargs)
-        self.unfix_qps()
 
         return result
 
     def optimize_qp_fine(self, *args, **kwargs):
 
         self.fix_epss()
+        self.unfix_qps()
         self.optimize_target = 'qp_fine'
         result = self.optimize(*args, **kwargs)
-        self.unfix_epss()
 
         return result
 
@@ -569,6 +662,12 @@ def Fit_eps_PointByPoint(S_targets, target_fs,
                         S_targets_uncertainty=.01,
                         exp=1, plot=True,
                         **leastsq_kwargs):
+
+    # Check inputs
+    assert len(S_targets) == len(target_fs)
+    if hasattr(eps_guess, '__len__'):
+        assert len(eps_guess) == len(target_fs)
+
     # Define the residual function for this optimizer
     def PbP_eps_residual(params, *args):
 
@@ -592,14 +691,18 @@ def Fit_eps_PointByPoint(S_targets, target_fs,
     # Loop over frequencies and target values, find matching permittivity at each
     t0 = time.time()
     qp = 1e20  # A qp value big enough to turn off 2D material
-    eps_pred = eps_guess  # This is an initial guess to get the nonlinear fitting started
     deps = 1e-2  # An infinitessimal permittivity for computing variation of output to input
 
-    for freq, S_target in zip(target_fs, S_targets):
+    for i,(freq, S_target) in enumerate(zip(target_fs, S_targets)):
         t0 = time.time()
 
+        # Decide how to start the fitting
+        if hasattr(eps_guess, '__len__'): eps0 = eps_guess[i]
+        elif i==0: eps0 = eps_guess
+        else: eps0 = eps_pred # Take previous prediction value
+
         # Set up parameters for this optimization
-        x0 = (eps_pred.real, eps_pred.imag)
+        x0 = (eps0.real, eps0.imag)
         args = (S_target.real, S_target.imag, Predictor, qp, exp)
 
         # Run optimization
@@ -650,7 +753,7 @@ def Fit_eps_PointByPoint(S_targets, target_fs,
     return result
 
 
-def FitPbP_eps_to_oscillators(eps_target, target_fs,
+def Fit_epss_to_oscillators(eps_target, target_fs,
                             MaterialModel, Nosc, amp, eps0, exp=1,
                             reset_MaterialModel=True, **leastsq_kwargs):
     # Define the residual function for this oscillator
@@ -716,10 +819,32 @@ def FitPbP_eps_to_oscillators(eps_target, target_fs,
 
     return eps_smooth
 
+FitPbP_eps_to_oscillators = Fit_epss_to_oscillators
+
 def Fit_qp_PointByPoint(S_targets, target_fs,
                        Predictor, epss, qp_guess,
                        S_targets_uncertainty=.01, exp=1, plot=True,
+                        reverse=False,
                        **leastsq_kwargs):
+    """
+    :param S_targets:  Should consist of signal from 2D material relative to substrate
+    :param target_fs:
+    :param Predictor:  Should return near-field signal relative to *anything*, normalization to substrate will be impleneted in this function.
+    :param epss: Known permittivity (values) for the substrate
+    :param qp_guess:
+    :param S_targets_uncertainty:
+    :param exp:
+    :param plot:
+    :param reverse:
+    :param leastsq_kwargs:
+    :return:
+    """
+
+    # Check inputs
+    assert len(S_targets) == len(target_fs)
+    if hasattr(qp_guess, '__len__'):
+        assert len(qp_guess) == len(target_fs)
+
     # Define residual function
     def PbP_qp_residual(params, *args):
 
@@ -735,24 +860,32 @@ def Fit_qp_PointByPoint(S_targets, target_fs,
 
         return to_minimize
 
+    if reverse:
+        S_targets = S_targets[::-1]
+        target_fs = target_fs[::-1]
+
     # Predictor should give signal from (2D+substrate) relative to (substrate)
-    qp0 = 1e24
-    Predictor_subs_norm = lambda qp, eps: Predictor(qp, eps) / Predictor(qp0, eps)
+    global qpmax
+    Predictor_subs_norm = lambda qp, eps: Predictor(qp, eps) / Predictor(qpmax, eps)
 
     # Holders for point-by-point parameters
     qps_pred = []  # We will fill this with predicted `q_p` values at each frequency
     dqps = []
-    qp_pred = qp_guess  # This is an initial guess to get the nonlinear fitting started
     Ss_pred = []
     Ss_pred2 = []
 
     # For each frequency and substrate permittivity, add a qp to match the target
     t0 = time.time()
-    for freq, eps, S_target in zip(target_fs, epss, S_targets):
+    for i,(freq, eps, S_target) in enumerate(zip(target_fs, epss, S_targets)):
         t1 = time.time()
 
+        # Decide how to start the fitting
+        if hasattr(qp_guess, '__len__'): qp0 = qp_guess[i]
+        elif i==0: qp0 = qp_guess
+        else: qp0 = qp_guess # Take previous prediction value
+
         # Update the guess qp and arguments to fit
-        x0 = (qp_pred.real, qp_pred.imag)
+        x0 = (qp0.real, qp0.imag)
         args = (S_target.real, S_target.imag, Predictor_subs_norm, eps, exp)
 
         # Run optimization
@@ -810,14 +943,20 @@ def Fit_qp_PointByPoint(S_targets, target_fs,
         plt.title(r'$-1/q_p$ from point-by-point fit')
         plt.legend()
 
+    if reverse:
+        qps_pred=qps_pred[::-1]
+        Ss_pred=Ss_pred[::-1]
+        Delta_qps=Delta_qps[::-1]
+        Delta_eps2D=Delta_eps2D[::-1]
+
     result = dict(qp_predicted=qps_pred, S_predicted=Ss_pred,
                   Delta_qps=Delta_qps, Delta_eps2D=Delta_eps2D)
 
     return result
 
 
-def Fit_PbP_qp_to_oscillators(qp_target, target_fs,
-                               MaterialModel, Nosc, amp, eps0, exp=1,
+def Fit_qps_to_oscillators(qp_target, target_fs,
+                               MaterialModel, Nosc=1, amp=0, eps0=0, exp=1,
                                qpinv_target_uncertainties=None,
                                reset_MaterialModel=True, plot=True,
                                **leastsq_kwargs):
@@ -844,7 +983,7 @@ def Fit_PbP_qp_to_oscillators(qp_target, target_fs,
 
     # Make sure the qp is absorptive
     qpinv_target = -1 / qp_target
-    qpinv_target = qpinv_target.real + 1j * np.abs(qpinv_target)
+    qpinv_target = qpinv_target.real + 1j * np.abs(qpinv_target.imag)
     qp_target = -1 / qpinv_target
 
     # Compute certainty and set up arguments to residual
@@ -915,3 +1054,5 @@ def Fit_PbP_qp_to_oscillators(qp_target, target_fs,
         plt.title(r'$-1/q_p$ values before fitting')
 
     return qp_smooth
+
+Fit_PbP_qp_to_oscillators = Fit_qps_to_oscillators

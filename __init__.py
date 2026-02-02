@@ -280,6 +280,64 @@ def load(probe, cls, overwrite_probe=False): #Load the object of `cls` associate
 
     return obj
 
+def get_probe(probe):
+    """Intended primarily to find a probe whose name is `probe`; can also feed-through `probe` of type `Probe`."""
+
+    assert isinstance(probe, (Probe, str))
+
+    if isinstance(probe,Probe): return probe
+    elif isinstance(probe,str):
+        probe_name = probe
+        try: probe = ProbesCollection[probe_name]
+        except KeyError:
+            probe = load(probe_name,Probe,overwrite_probe=True) # this will automatically add to ProbeCollection
+
+        return probe
+
+class SlenderizeSerialization(object):
+    """Inheritors should implement `get_probe` method and `attrs_to_serialize` attribute.
+    Attributes listed in the latter should themselves also have `get_probe` method so that
+    they are compatible with `PCE.save(..)` for automatic serialization."""
+
+    attrs_to_serialize = {}
+
+    def __getstate__(self):
+
+        state = self.__dict__.copy()
+
+        # Save bulky objects alone, and replace dictionary value with cls
+        probe_name = self.get_probe()
+        for attr in self.attrs_to_serialize:
+            if not attr in state: continue # It's okay if we listed redundant items in `attrs_to_serialize`
+            obj = state[attr]
+            save(obj,overwrite=True) # here the `obj` should have `get_probe` attribute.
+            state[attr]=probe_name # Replace now with probe name
+
+        return state
+
+    def __setstate__(self, state):
+
+        self.__dict__.update(state)
+
+        # The primary purpose here is to rename legacy attributes upon unpickling
+        #newattrs = {'_P': 'Probe'}
+        #for dest, src in newattrs.items():
+        #    if not hasattr(self, dest):
+        #        if isinstance(src, str):  # interpret src as a key to write from
+        #            if src in state:  setattr(self, dest, state[src])
+        #        else:
+        #            setattr(self, dest, src)
+
+        # Load objects from file if they were stored by probe name string only
+        for attr in self.attrs_to_serialize:
+            if not attr in self.__dict__: continue # It's okay if we listed redundant items in `attrs_to_serialize`
+            if not isinstance(self.__dict__[attr],str): pass
+            probe_name = self.__dict__[attr]
+            cls = self.attrs_to_serialize[attr]
+            self.__dict__[attr] = load(probe_name,cls)
+
+#---- Utilities for Probe
+
 def wrap_rp(rp,freq_to_wn,q_to_wn):
     """Wrap `rp` so that it accepts dimensionless arguments, and converts them to wavenumbers,
     before feeding to the underlying `rp` function."""
@@ -363,6 +421,8 @@ class Probe(object):
         self.set_gap(gap)
 
         self.all_rp_vals=[]
+
+        self.slender_factor = 1 # Will be used as an overall scaling factor for the eigenpoles, akin to "sharpening" the probe
 
     def get_name(self):
         try: return copy.copy(self._name)
@@ -887,13 +947,30 @@ class Probe(object):
 
         return rhos, Qs
 
+    def get_slender_factor(self):
+
+        if not hasattr(self, 'slender_factor'): self.slender_factor = 1
+        if self.slender_factor != 1:
+            if self.verbose:
+                print('\t Probe slenderness enhanced by factor:',self.slender_factor)
+
+        return self.slender_factor
+
     def get_Nmodes(self): return len(self.get_eigenrhos())
         
-    def get_eigenrhos(self): return copy.copy(self._eigenrhos)
+    def get_eigenrhos(self):
+
+        rhos = self._eigenrhos
+        rhos = 1+(rhos-1)*self.get_slender_factor()
+
+        return rhos
             
     def get_eigenrho(self,eigenindex):
+
+        rho = self.get_eigenrhos()[eigenindex]
+        rho = 1+(rho-1)*self.get_slender_factor()
         
-        return self.get_eigenrhos()[eigenindex]
+        return rho
             
     def plot_eigenrhos(self,xmax=20,ymax=1e6,f=None):
         """Use this to plot the computed eigenreflectances and

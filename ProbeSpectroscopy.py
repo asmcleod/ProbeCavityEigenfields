@@ -13,6 +13,8 @@ from common import numerical_recipes as numrec
 from common.baseclasses import AWA
 import ProbeCavityEigenfields as PCE
 
+#--- Base classes
+
 #--- Utilities
 
 def get_superset_indices(subset,superset):
@@ -33,13 +35,18 @@ def get_superset_indices(subset,superset):
 
 #--- Probe Spectroscopy
 
-class ProbeSpectroscopy(object):
+class ProbeSpectroscopy(PCE.SlenderizeSerialization):
+
+    # This is a log of those bulky attributes that should be serialized separately,
+    # and which should be set to probe name only upon serialization (`__getstate__`)
+    # (and they will be unserialized upon `__setstate__`)
+    attrs_to_serialize = {'Probe':PCE.Probe}
 
     def __init__(self, Probe):
 
         # Store details of the Probe to restore later
         assert isinstance(Probe, PCE.Probe)
-        self.Probe=Probe
+        self.Probe=Probe.get_name()
 
         self._recorded_eigenrhos = {}
         self._recorded_eigencharges = {}
@@ -50,20 +57,10 @@ class ProbeSpectroscopy(object):
         self.eigenrhos = None
         self.eigencharges = None
 
-    def __setstate__(self, state):
+    def get_probe(self):
 
-        # The primary purpose here is to rename legacy attributes upon unpickling
-        self.__dict__.update(state)
-
-        newattrs = {'_P': 'Probe'}
-        for dest, src in newattrs.items():
-            if not hasattr(self, dest):
-                if isinstance(src, str):  # interpret src as a key to write from
-                    if src in state:  setattr(self, dest, state[src])
-                else:
-                    setattr(self, dest, src)
-
-    def get_probe(self): return self.Probe
+        if isinstance(self.Probe,str): return PCE.get_probe(self.Probe)
+        else: return self.Probe
 
     def check(self):
 
@@ -72,7 +69,7 @@ class ProbeSpectroscopy(object):
 
         # Test that we can associate this spectroscopy with the attached probe.
         ctest = list(charges.values())[0][0] #First coord, first eigenindex
-        try: self.Probe._toAWA(ctest)
+        try: self.get_probe()._toAWA(ctest)
         except:
             raise ValueError(
                 'The attached probe does not seem to associated with this `ProbeSpectroscopy`!  The latter should be recomputed.')
@@ -111,22 +108,23 @@ class ProbeSpectroscopy(object):
 
         if verbose: Logger.write('Updating eigenrhos to coordinate %1.2E...' % self._coord)
         rhos = self._recorded_eigenrhos[self._coord]
-        self.Probe._eigenrhos = rhos
+        Probe = self.get_probe()
+        Probe._eigenrhos = rhos
 
         if update_charges:
             if verbose: Logger.write('\tUpdating eigencharges...')
             charges = self._recorded_eigencharges[self._coord]
-            self.Probe._eigencharges = charges
+            Probe._eigencharges = charges
         if update_Zself:
             if verbose: Logger.write('\tUpdating self impedance...')
             ZSelf = self._recorded_self_impedances[self._coord]
-            self.Probe._ZSelf = ZSelf
+            Probe._ZSelf = ZSelf
         if update_Zmirror:
             if verbose: Logger.write('\tUpdating mirror impedance...')
             ZMirror = self._recorded_mirror_impedances[self._coord]
-            self.Probe._ZMirror = ZMirror
+            Probe._ZMirror = ZMirror
 
-        return self.get_probe()
+        return Probe
 
     def set_eigenset(self,probe,coord,
                      update_charges=True,update_Zself=True,update_Zmirror=True):
@@ -630,12 +628,12 @@ class ProbeFrequencySpectroscopyParallel(ProbeSpectroscopyParallel):
 
     def get_probe_at_coord(self, freq, *args,**kwargs):
 
-        result = super().get_probe_at_coord(freq, *args,**kwargs)
+        probe = super().get_probe_at_coord(freq, *args,**kwargs)
 
         # Don't call `set_freq` which would trigger `reset_eigenproperties` unnessecarily
-        self.Probe._freq = self._coord
+        probe._freq = self._coord
 
-        return result
+        return probe
 
     def set_eigenset(self,Probe, freq, *args,**kwargs):
 
@@ -684,12 +682,12 @@ class ProbeGapSpectroscopyParallel(ProbeSpectroscopyParallel):
 
     def get_probe_at_coord(self, gap,*args,**kwargs):
 
-        result = super().get_probe_at_coord(gap,*args,**kwargs)
+        probe = super().get_probe_at_coord(gap,*args,**kwargs)
 
         # Don't call `set_gap` which would trigger `reset_eigenproperties` unnessecarily
-        self.Probe._gap = self._coord
+        probe._gap = self._coord
 
-        return result
+        return probe
 
     get_probe_at_gap = get_probe_at_coord
 
@@ -720,7 +718,7 @@ class ProbeGapSpectroscopyParallel(ProbeSpectroscopyParallel):
 
         return self._encodedEigenfields
 
-class EncodedEigenfields(object):
+class EncodedEigenfields(PCE.SlenderizeSerialization):
     """This function condensed a `ProbeSpectroscopy` object
     down to an encoded version that can duck-type in some functionalities
     as a `Probe` object.
@@ -729,6 +727,25 @@ class EncodedEigenfields(object):
     demodulated near-field scattering signals can be computed easily.
 
     Wrapping other probe spectroscopy types is not yet supported (or useful?)."""
+
+    #---- Loading / saving
+
+    def get_probe(self):
+
+        # It is preferred that the `Probe` attribute simply stores the probe name, and PCE does the fetching.
+        if isinstance(self.Probe,str): return PCE.get_probe(self.Probe)
+        else: return self.Probe
+
+    # This is a log of those bulky attributes that should be serialized separately,
+    # and which should be set to probe name only upon serialization (`__getstate__`)
+    # (and they will be unserialized upon `__setstate__`)
+    attrs_to_serialize = {'Probe': PCE.Probe}
+
+    filename_template = '(%s)_EncodedEigenfields.pickle'
+
+    def save(self, overwrite=False):  return PCE.save(self, overwrite=overwrite)
+
+    #--- Initialization
 
     verbose = True
 
@@ -752,6 +769,7 @@ class EncodedEigenfields(object):
         ind0 = np.argmin( (gaps-gap0)**2 )
         self._gap0 = gaps[ind0]
         P0 = Spec.get_probe_at_coord(self._gap0)
+        self.Probe = P0.get_name()
 
         # we take k=0 propagators to conform with the quasistatic context for the eigenfields
         dP = P0.getFourPotentialPropagators(farfield=False, k=0,
@@ -795,22 +813,26 @@ class EncodedEigenfields(object):
         self.PsiMats_ = PsiMats #underscore because method will share same name
         self.Nmodes = Nmodes
 
-        #--- Attach probe with the correctly signed eigencharges
-        self.Probe=P0
-        self.Probe._eigencharges = eigencharges_vs_gap.cslice[:,gap0,:]
+        self.slender_factor = 1 # Will be used as an overall scaling factor for the eigenpoles, akin to "sharpening" the probe
 
-    def __getstate__(self):
-        # The primary purpose here is to trim away unnecessary or redundant attributes before pickling
+    def get_slender_factor(self):
 
-        self.Probe._gapSpectroscopy = None #Spectroscopy data is too enormous to keep, hope it was saved independently
+        if not hasattr(self,'slender_factor'): self.slender_factor = 1
+        if self.slender_factor != 1:
+            if self.verbose:
+                print('\t Probe slenderness enhanced by factor:',self.slender_factor)
 
-        return self.__dict__
+        return self.slender_factor
 
-    def get_probe(self): return self.Probe
+    def apply_slender_factor(self,pole,slender_factor):
 
-    filename_template = '(%s)_EncodedEigenfields.pickle'
+        #Sr = np.abs(slender_factor.real)
+        #Si = np.abs(slender_factor.imag)
+        #pole = 1+(np.real(pole)-1)*Sr + 1j*np.imag(pole)*(1+Si) # Additional imaginary boost factor
+        slender_factor = np.abs(np.real(slender_factor))-1j*np.abs(slender_factor.imag) # poles must remain in fourth quadrant
+        pole = 1+(pole-1)*slender_factor
 
-    def save(self, overwrite=False):  return PCE.save(self, overwrite=overwrite)
+        return pole
 
     @functools.lru_cache(maxsize=3) #Likely to be called often with the same arguments
     def BVecs(self, *at_coords, extrapolate=True, kind='linear'):
@@ -839,12 +861,16 @@ class EncodedEigenfields(object):
         return self._PsiMats
 
     @functools.lru_cache(maxsize=3) #Likely to be called often with the same arguments
-    def PoleMats(self, *at_coords, extrapolate=True,kind='linear'):
+    def PoleMats(self, *at_coords, extrapolate=True,kind='linear',slender_factor=1):
 
         Poles_at_coords = self.Poles.interpolate_axis(at_coords, axis=0,
                                                           extrapolate=extrapolate,
                                                           bounds_error=(not extrapolate),
                                                           kind=kind)
+        Poles_at_coords = np.array(Poles_at_coords) # drop the AWA
+
+        Poles_at_coords = self.apply_slender_factor(Poles_at_coords,slender_factor) # Rescale the poles
+
         self._PoleMats = [np.matrix(np.diag(Poles_at_coord)) for
                          Poles_at_coord in Poles_at_coords] #column vectors
         self._PoleMats = np.array(self._PoleMats)
@@ -861,7 +887,8 @@ class EncodedEigenfields(object):
 
         BVecs = self.BVecs(*at_gaps,kind=kind)
         PsiMats = self.PsiMats(*at_gaps,kind=kind)
-        PoleMats = self.PoleMats(*at_gaps,kind=kind)
+        PoleMats = self.PoleMats(*at_gaps,kind=kind,
+                                 slender_factor =  self.get_slender_factor()) # Provide `slender_factor` as argument so it will be a key for caching
 
         if Nmodes is None:
             if RMat0 is not None: Nmodes = RMat0.shape[0] #If a reflection matrix is provided, it has the number of modes desired
@@ -878,11 +905,12 @@ class EncodedEigenfields(object):
         if RMat0 is None:
             #sometimes `rp` function "leak" into the light cone, this lets us buffer it (we are anticipating imprecision in `rp`!)
             k = 2 * np.pi * freq
-            light_cone_buffer = self.Probe.light_cone_buffer # a class attribute
+            light_cone_buffer = self.get_probe().light_cone_buffer # a class attribute
             qs = np.sqrt(k ** 2 * light_cone_buffer + kappas ** 2).real #This will keep us out of the light cone
             if isinstance(rp,Number): rp_vs_q=rp
             else:
                 rp_vs_q = rp(freq, qs, **kwargs) #rp will have to anticipate dimensionless arguments
+                rp_vs_q = np.array(rp_vs_q) # drop the AWA
                 rp_vs_q[np.isnan(rp_vs_q)+np.isinf(rp_vs_q)] = 0  # This is just probably trying to evaluate at too large a momentum
             if record_rp_vals:
                 try: self.rp_vals_vs_q.append(rp_vs_q)
@@ -969,7 +997,7 @@ class EncodedEigenfields(object):
                             **kwargs):
 
         # Adapt dimensional arguments to the same units as the probe discretization
-        to_nm = a_nm / self.Probe.get_a(); from_nm = 1/to_nm
+        to_nm = a_nm / self.get_probe().get_a(); from_nm = 1/to_nm
         amplitude = amplitude_nm * from_nm
         gapmin = gapmin_nm * from_nm
         q_to_wn = from_nm * 1e7 # converting q values to wavenumbers will be also be done using the known tip dimensionful radius
@@ -977,7 +1005,7 @@ class EncodedEigenfields(object):
         # Convert frequency in wavenumbers to internal units
         # Properly wrapped `rp` will just undo this conversion identically, back to wavenumbers
         # But the dimensionless frequencies will be sized according to the indicated probe length `L_cm`
-        L = np.ptp(self.Probe.get_zs())  # Height of probe in internal units
+        L = np.ptp(self.get_probe().get_zs())  # Height of probe in internal units
         freq_to_wn = L/L_cm
         freqs = freqs_wn / freq_to_wn  # conversion factor from wavenumbers to internal frequency units
 
@@ -1145,7 +1173,7 @@ class EncodedEigenfields(object):
     def EradDemodulated2DFromLibrary(self,qp,eps,**kwargs):
 
         RMat0 = self.interpolate_Rmat2D_from_library(qp, eps)
-        result = self.EradSpectrumDemodulated(freqs=self.Probe.get_freq(),
+        result = self.EradSpectrumDemodulated(freqs=self.get_probe().get_freq(),
                                                 RMat0=RMat0, **kwargs)
 
         return result # Result will have whatever format the `Erad` function uses
@@ -1192,10 +1220,26 @@ def find_roots_custom(p, scaling=10):
     return linalg.eigvals(Mstar)
 
 
-class InvertibleEigenfields(object):
+class InvertibleEigenfields(PCE.SlenderizeSerialization):
+
+    #--- Loading / saving
+
+    filename_template = '(%s)_InvertibleEigenfields.pickle'
+
+    def get_probe(self):
+
+        # It is preferred that the `Probe` attribute simply stores the probe name, and PCE does the fetching.
+        if isinstance(self.Probe,str): return PCE.get_probe(self.Probe)
+        else: return self.Probe
+
+    # This is a log of those bulky attributes that should be serialized separately,
+    # and which should be set to probe name only upon serialization (`__getstate__`)
+    # (and they will be unserialized upon `__setstate__`)
+    attrs_to_serialize = {'Probe': PCE.Probe}
+
+    #---- Initialization
 
     verbose = True
-    filename_template = '(%s)_InvertibleEigenfields.pickle'
 
     def __init__(self, GapSpec, Nmodes=20,
                  interpolation='cubic',**kwargs):
@@ -1211,11 +1255,20 @@ class InvertibleEigenfields(object):
         self.Nmodes = self.Rs.shape[1]
         self.zs = self.Rs.axes[0]
 
-        self.Probe = GapSpec.Probe
+        self.Probe = GapSpec.Probe.get_name()
 
         self.build_poles_residues_interpolator(interpolation=interpolation,**kwargs)
 
-    def get_probe(self): return self.Probe
+        self.slender_factor = 1 # Will be used as an overall scaling factor for the eigenpoles, akin to "sharpening" the probe
+
+    def get_slender_factor(self):
+
+        if not hasattr(self, 'slender_factor'): self.slender_factor = 1
+        if self.slender_factor != 1:
+            if self.verbose:
+                print('\t Probe slenderness enhanced by factor:',self.slender_factor)
+
+        return self.slender_factor
 
     def polyfit_poles_residues(self, deg=6, zmax=None):
         #This is just in case we want to export later a better parametrization of the poles / residues vs. distance
@@ -1250,7 +1303,7 @@ class InvertibleEigenfields(object):
                           for R in self.Rs.T]
 
     @functools.lru_cache(maxsize=3) #Likely to be called often with the same arguments
-    def evaluate_poles(self, *zs, Nmodes=None):
+    def evaluate_poles(self, *zs, Nmodes=None, slender_factor=1):
 
         if not len(zs): zs = self.zs
 
@@ -1261,6 +1314,9 @@ class InvertibleEigenfields(object):
         #Ps = self.Ps[:, :Nmodes].interpolate_axis(zs, axis=0, kind=interpolation,
         #                                          bounds_error=False, extrapolate=True)
         Ps = [interp(zs) for interp in self.Ps_interp[:Nmodes]]
+
+        Ps = np.array(Ps)
+        Ps = 1 + (Ps-1)*slender_factor # Rescale the "z-slope" of poles
 
         return np.array(Ps).T #keep z-axis first
 
@@ -1280,7 +1336,7 @@ class InvertibleEigenfields(object):
         return np.array(Rs).T #keep z-axis first
 
     @functools.lru_cache(maxsize=3) #Likely to be called often with the same arguments
-    def evaluate_poles_poly(self, *zs, Nmodes=None):
+    def evaluate_poles_poly(self, *zs, Nmodes=None, slender_factor=1):
 
         if not len(zs): zs = self.zs
 
@@ -1289,6 +1345,7 @@ class InvertibleEigenfields(object):
             Nmodes = self.Nmodes
 
         Ps = np.array([np.polyval(Ppoly, zs) for Ppoly in self.Ppolys[:Nmodes]])
+        Ps = 1 + (Ps-1)*slender_factor # Rescale the "z-slope" of poles
 
         return Ps.T
 
@@ -1354,7 +1411,8 @@ class InvertibleEigenfields(object):
         # Evaluate at all nodal points
         # Add first axis as frequencies
         Rs = self.evaluate_residues(*zs, Nmodes=Nmodes)[np.newaxis,:]
-        Ps = self.evaluate_poles(*zs, Nmodes=Nmodes)[np.newaxis,:]
+        Ps = self.evaluate_poles(*zs, Nmodes=Nmodes,
+                                 slender_factor = self.get_slender_factor())[np.newaxis,:] # Provide `slender_factor` as keyword so it's used for caching
 
         # Should broadcast over freqs if beta has an additional first axis
         # The offset term is absolutely critical, offsets false z-dependence arising from first terms
@@ -1410,7 +1468,7 @@ class InvertibleEigenfields(object):
                             **kwargs):
 
         # Adapt dimensional arguments to the same units as the probe discretization
-        to_nm = a_nm / self.Probe.get_a(); from_nm = 1/to_nm
+        to_nm = a_nm / self.get_probe().get_a(); from_nm = 1/to_nm
         amplitude = amplitude_nm * from_nm
         gapmin = gapmin_nm * from_nm
         print('amplitude=',amplitude)
@@ -1426,7 +1484,7 @@ class InvertibleEigenfields(object):
             signals_ref={}
             signals_ref['Sn'] = self.EradSpectrumDemodulated(beta_norm, zmin=gapmin,amplitude=amplitude,
                                                              max_harmonic=max_harmonic,Nts=Ngaps, Nmodes=Nmodes)
-            if signals_ref['Sn'].ndim == 1:
+            if signals_ref['Sn'].ndim == 2 and signals_ref['Sn'].ndim ==1: # In case we have second frequency axis
                 signals['Sn_norm'] = signals['Sn'] / signals_ref['Sn'][:,np.newaxis]
             else: signals['Sn_norm'] = signals['Sn'] / signals_ref['Sn']
 
@@ -1503,7 +1561,8 @@ class InvertibleEigenfields(object):
         zs = np.array(zs)
 
         Rs = self.evaluate_residues(*zs,Nmodes=Nmodes)
-        Ps = self.evaluate_poles(*zs,Nmodes=Nmodes)
+        Ps = self.evaluate_poles(*zs,Nmodes=Nmodes,
+                                 slender_factor = self.get_slender_factor())
 
         # `rs` and `ps` can safely remain as arrays for `invres`
         rs = (Rs * ws_grid).flatten()
