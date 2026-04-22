@@ -24,7 +24,7 @@ class EncodedEigenfieldsPredictor(PCE.SlenderizeSerialization):
 
     #----- Saving / loading
 
-    filename_template = '(%s)_InvertibleEigenfieldsPredictor.pickle'
+    filename_template = '(%s)_EncodedEigenfieldsPredictor.pickle'
 
     attrs_to_serialize = {'Probe': PCE.Probe,
                           'EncodedEigenfields':PS.EncodedEigenfields}
@@ -162,6 +162,143 @@ class InvertibleEigenfieldsPredictor(PCE.SlenderizeSerialization):
         return S / self.S_ref
 
     def __call__(self, *args, **kwargs):
+        return self.compute_norm_signal(*args, **kwargs)
+
+
+class LayeredMediaEncodedEigenfieldsPredictor(PCE.SlenderizeSerialization):
+    """Simple predictor callable as `Predictor(qp,eps)` that will delivery a normalized signal
+    as quickly as possible using the information from a `PS.EncodedEigenfields` instance.
+
+    The full thickness of a 2D material will be incorporated into the simulation, at some expense,
+    using the `reflection_p` attribute of a `NearFieldOptics.Materials.LayeredMediaTM` instance.
+    The thickness of the layer must be specified in nanometers.
+
+    For this predictor, all supplied values of `qp` will be interpreted in units of wavenumbers."""
+
+    # ----- Saving / loading
+
+    filename_template = '(%s)_LayeredMediaEncodedEigenfieldsPredictor.pickle'
+
+    attrs_to_serialize = {'Probe': PCE.Probe,
+                          'EncodedEigenfields': PS.EncodedEigenfields}
+
+    # ---- Initialization
+
+    def __init__(self, encoded_eigenfields,
+                 thickness_nm,
+                 harmonic=2,
+                 qp_ref=1e30,
+                 eps_ref=1e8,
+                 a_nm=30, amplitude_nm=50, Nts=24, gapmin_nm=1,
+                 L_cm=20e-4, Nmodes=15):
+
+        self.qpmax = 1e28
+
+        # ---- Attach probe
+        assert isinstance(encoded_eigenfields, PS.EncodedEigenfields)
+        self.EncodedEigenfields = encoded_eigenfields
+        self.freq = encoded_eigenfields.get_probe().get_freq()
+
+        # ---- Convert objective units to subjective (interal) units
+        # Adapt dimensional arguments to the same units as the probe discretization
+        to_nm = a_nm / self.EncodedEigenfields.get_probe().get_a();
+        from_nm = 1 / to_nm
+        amplitude = amplitude_nm * from_nm
+        gapmin = gapmin_nm * from_nm
+        self.q_to_wn = from_nm * 1e7  # converting q values to wavenumbers will be also be done using the known tip dimensionful radius
+
+        # Convert frequency in wavenumbers to internal units
+        # Properly wrapped `rp` will just undo this conversion identically, back to wavenumbers
+        # But the dimensionless frequencies will be sized according to the indicated probe length `L_cm`
+        L = np.ptp(self.get_probe().get_zs())  # Height of probe in internal units
+        self.freq_to_wn = L / L_cm
+
+        # ---- Build gaps and demodulation kernel
+        # Demodulation quadrature nodes (and weights) in time
+        from common import numerical_recipes as numrec
+        self.ts, self.dts = numrec.GetQuadrature(N=Nts, xmin=-.5, xmax=0,
+                                                 quadrature=numrec.GL)
+        self.kernel = np.cos(2 * np.pi * harmonic * self.ts) * self.dts
+        self.kernel -= np.mean(self.kernel)
+
+        # Corresponding gap heights
+        self.at_gaps = gapmin + amplitude * (1 + np.cos(2 * np.pi * self.ts))
+        self.Nmodes = Nmodes
+
+        # --- Build layered media
+        from NearFieldOptics import Materials as M
+        self.thickness_nm = thickness_nm
+        mat_film = M.IsotropicMaterial(eps_infinity=1)
+        mat_subs = M.IsotropicMaterial(eps_infinity=1)
+        self.layers = M.LayeredMediaTM((mat_film, self.thickness_nm * 1e-7), exit=mat_subs)
+
+        # Wrap the provided rp functions so they can expand out dimensionless frequencies and wavevectors
+        # The supplied reflection function should take `frequency (wavenumbers), q (wavenumbers)`
+        self.wrapped_rp = PCE.wrap_rp(self.layers.reflection_p, self.freq_to_wn, self.q_to_wn)
+
+        # --- Set reference signal
+        self.is_vectorized = False  # The `compute_signal` attribute is NOT vectorized for this Predictor
+
+        self.Sref = self.set_Sref(qp_ref, eps_ref)
+
+    def get_probe(self):
+        return self.EncodedEigenfields.get_probe()
+
+    def massage_arg(self, arg):  # Assume argument must have positive imaginary
+
+        arg = complex(arg)
+
+        return arg.real + 1j * np.abs(arg.imag)
+
+    def qp_to_eps_thin_film(self, qp):
+
+        eps_excess = -2 / (qp * self.thickness_nm * 1e-7)
+        eps_thin_film = 1 + eps_excess
+
+        return eps_thin_film
+
+    def set_materials(self, qp, eps):
+
+        # Inhibit negative imaginary for qp or eps
+        qp = self.massage_arg(qp)  # understood in units of wavenumbers
+
+        self.eps = self.massage_arg(eps)
+        if qp.real > self.qpmax.real:
+            self.eps_thin_film = self.eps
+        else:
+            self.eps_thin_film = self.qp_to_eps_thin_film(qp)
+
+        # We will strictly set epsilon via `eps_infinity` for these Isotropic Materials
+        self.layers.get_exit().eps_infinity = self.eps
+        self.layers.get_layers()[0].get_material().eps_infinity = self.eps_thin_film
+
+    def compute_signal(self, qp, eps):  # This simulates a 2D material
+
+        self.set_materials(qp, eps)
+
+        self.erad_vs_gap = self.EncodedEigenfields.EradVsGap(self.at_gaps, freq=self.freq, RMat0=None,
+                                                             Nmodes=self.Nmodes, rp=self.wrapped_rp,
+                                                             record_rp_vals=False, as_AWA=False, interpolation='linear')
+
+        # here is the demodulation! at quadrature nodes
+        self.erad_vs_gap = np.array(self.erad_vs_gap)
+        Sn = 4 * np.sum(self.kernel * self.erad_vs_gap, axis=0)
+
+        return complex(Sn)
+
+    def set_Sref(self, qp_ref, eps_ref):
+
+        S = self.compute_signal(qp_ref, eps_ref)
+        self.S_ref = S  # Signal value to which we pretend data were referenced
+
+    def compute_norm_signal(self, qp, eps):
+
+        S = self.compute_signal(qp, eps)
+
+        return S / self.S_ref
+
+    def __call__(self, *args, **kwargs):
+
         return self.compute_norm_signal(*args, **kwargs)
 
 class VariationalMaterial2D(PCE.SlenderizeSerialization):
@@ -1051,7 +1188,7 @@ def Fit_qps_to_oscillators(qp_target, target_fs,
         plt.plot(target_fs, eps2D_smooth.real, ls='-', label='smooth fit', color='b')
         plt.plot(target_fs, eps2D_smooth.imag, ls='-', label='Imag', color='r')
         plt.legend()
-        plt.title(r'$-1/q_p$ values before fitting')
+        plt.title(r'$-1/q_p$ values after fitting')
 
     return qp_smooth
 

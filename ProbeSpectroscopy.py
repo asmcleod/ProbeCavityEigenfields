@@ -878,16 +878,16 @@ class EncodedEigenfields(PCE.SlenderizeSerialization):
         return self._PoleMats
 
     def EradVsGap(self, at_gaps, freq, RMat0=None, Nmodes=None,rp=None,
-                  record_rp_vals=False, as_AWA=True, kind='linear',**kwargs):
+                  record_rp_vals=False, as_AWA=True, interpolation='linear',**kwargs):
 
         #--- Get ingredients and restrict to a narrower range of `Nmodes` if requested
         kappas = self.kappas
         dkappas = self.dkappas
         Phi0Vecs = self.Phi0Vecs #column vectors of scalar field vs kappa
 
-        BVecs = self.BVecs(*at_gaps,kind=kind)
-        PsiMats = self.PsiMats(*at_gaps,kind=kind)
-        PoleMats = self.PoleMats(*at_gaps,kind=kind,
+        BVecs = self.BVecs(*at_gaps,kind=interpolation)
+        PsiMats = self.PsiMats(*at_gaps,kind=interpolation)
+        PoleMats = self.PoleMats(*at_gaps,kind=interpolation,
                                  slender_factor =  self.get_slender_factor()) # Provide `slender_factor` as argument so it will be a key for caching
 
         if Nmodes is None:
