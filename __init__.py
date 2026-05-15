@@ -9,6 +9,7 @@ from collections import UserDict
 from numbers import Number
 from common.log import Logger
 from matplotlib import pyplot as plt
+import inspect
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -218,123 +219,6 @@ class _ProbesCollection(UserDict):
 ProbesCollection=_ProbesCollection()
 
 PC = ProbesCollection # A short alias
-##############################
-# --- Save / load facilities.
-# Any object can utilize these, who defines attribute `filename_template` and method `get_probe()`
-#############################
-
-probe_models_dir = os.path.join(os.path.dirname(__file__),'Probe models')
-if not os.path.exists(probe_models_dir): os.mkdir(probe_models_dir)
-
-def get_filepath(probe, cls): #Get the filepath for object of `cls` associated with `probe`
-
-    if isinstance(probe,Probe): probe_name = probe.get_name()
-    else:
-        assert isinstance(probe,str)
-        probe_name = probe
-    filename = cls.filename_template % probe_name
-    filepath = os.path.join(probe_models_dir, filename)
-
-    return filepath
-
-def save(obj, overwrite=False):
-
-    if hasattr(obj,'get_probe'): probe = obj.get_probe()
-    else:
-        assert isinstance(obj,Probe)
-        probe=obj
-
-    filepath = get_filepath(probe, obj)
-
-    if os.path.exists(filepath) and not overwrite:
-        raise OSError('File "%s" exists!  Set `overwrite=True` to do so.' % filepath)
-
-    import pickle
-    with open(filepath, 'wb') as f:
-        pickle.dump(obj, f)
-        print('Successfully saved to file "%s"!' % filepath)
-
-def load(probe, cls, overwrite_probe=False): #Load the object of `cls` associated with `probe`
-
-    filepath = get_filepath(probe,cls)
-    print('Attemping to load from file "%s"...'%filepath)
-
-    prev_val = ProbesCollection._overwrite
-    if overwrite_probe: #(temporarily) set to overwrite if commanded
-        ProbesCollection.overwrite(True)
-
-    try_path = os.path.join(probe_models_dir,filepath)
-    if not os.path.exists(filepath) and os.path.exists(try_path):
-        filepath = try_path
-
-    try:
-        with open(filepath,'rb') as f:
-            obj = pickle.load(f)
-            print('Successfully loaded from file "%s"!'%filepath)
-        ProbesCollection.overwrite(prev_val)
-    except ValueError as e:
-        ProbesCollection.overwrite(prev_val) # Whether error or not, make sure previous overwrite status is restored
-        msg = e.args[0]
-        msg += '  You may avert this error by passing keyword `overwrite=True` to `load`!'
-        raise ValueError(msg)
-
-    return obj
-
-def get_probe(probe):
-    """Intended primarily to find a probe whose name is `probe`; can also feed-through `probe` of type `Probe`."""
-
-    assert isinstance(probe, (Probe, str))
-
-    if isinstance(probe,Probe): return probe
-    elif isinstance(probe,str):
-        probe_name = probe
-        try: probe = ProbesCollection[probe_name]
-        except KeyError:
-            probe = load(probe_name,Probe,overwrite_probe=True) # this will automatically add to ProbeCollection
-
-        return probe
-
-class SlenderizeSerialization(object):
-    """Inheritors should implement `get_probe` method and `attrs_to_serialize` attribute.
-    Attributes listed in the latter should themselves also have `get_probe` method so that
-    they are compatible with `PCE.save(..)` for automatic serialization."""
-
-    attrs_to_serialize = {}
-
-    def __getstate__(self):
-
-        state = self.__dict__.copy()
-
-        # Save bulky objects alone, and replace dictionary value with cls
-        probe_name = self.get_probe()
-        for attr in self.attrs_to_serialize:
-            if not attr in state: continue # It's okay if we listed redundant items in `attrs_to_serialize`
-            obj = state[attr]
-            save(obj,overwrite=True) # here the `obj` should have `get_probe` attribute.
-            state[attr]=probe_name # Replace now with probe name
-
-        return state
-
-    def __setstate__(self, state):
-
-        self.__dict__.update(state)
-
-        # The primary purpose here is to rename legacy attributes upon unpickling
-        #newattrs = {'_P': 'Probe'}
-        #for dest, src in newattrs.items():
-        #    if not hasattr(self, dest):
-        #        if isinstance(src, str):  # interpret src as a key to write from
-        #            if src in state:  setattr(self, dest, state[src])
-        #        else:
-        #            setattr(self, dest, src)
-
-        # Load objects from file if they were stored by probe name string only
-        for attr in self.attrs_to_serialize:
-            if not attr in self.__dict__: continue # It's okay if we listed redundant items in `attrs_to_serialize`
-            if not isinstance(self.__dict__[attr],str): pass
-            probe_name = self.__dict__[attr]
-            cls = self.attrs_to_serialize[attr]
-            self.__dict__[attr] = load(probe_name,cls)
 
 #---- Utilities for Probe
 
@@ -1624,3 +1508,150 @@ class Probe(object):
                                                                     Nmodes=Nmodes, **kwargs)
 
         return self._gapSpectroscopy
+
+##############################
+# --- Save / load facilities.
+# Any object can utilize these, who defines attribute `filename_template` and method `get_probe()`
+#############################
+
+probe_models_dir = os.path.join(os.path.dirname(__file__),'Probe models')
+if not os.path.exists(probe_models_dir): os.mkdir(probe_models_dir)
+
+def get_filepath(probe, cls): #Get the filepath for object of `cls` associated with `probe`
+
+    if isinstance(probe,Probe): probe_name = probe.get_name()
+    else:
+        assert isinstance(probe,str)
+        probe_name = probe
+    filename = cls.filename_template % probe_name
+    filepath = os.path.join(probe_models_dir, filename)
+
+    return filepath
+
+def save(obj, overwrite=False):
+
+    if hasattr(obj,'get_probe'): probe = obj.get_probe()
+    else:
+        assert isinstance(obj,Probe)
+        probe=obj
+
+    filepath = get_filepath(probe, obj)
+
+    if os.path.exists(filepath) and not overwrite:
+        raise OSError('File "%s" exists!  Set `overwrite=True` to do so.' % filepath)
+
+    import pickle
+    with open(filepath, 'wb') as f:
+        pickle.dump(obj, f)
+        print('Successfully saved to file "%s"!' % filepath)
+
+def load(probe, cls, overwrite_probe=False): #Load the object of `cls` associated with `probe`
+
+    filepath = get_filepath(probe,cls)
+    print('Attemping to load from file "%s"...'%filepath)
+
+    prev_val = ProbesCollection._overwrite
+    if overwrite_probe: #(temporarily) set to overwrite if commanded
+        ProbesCollection.overwrite(True)
+
+    try_path = os.path.join(probe_models_dir,filepath)
+    if not os.path.exists(filepath) and os.path.exists(try_path):
+        filepath = try_path
+
+    try:
+        with open(filepath,'rb') as f:
+            obj = pickle.load(f)
+            print('Successfully loaded from file "%s"!'%filepath)
+        ProbesCollection.overwrite(prev_val)
+    except ValueError as e:
+        ProbesCollection.overwrite(prev_val) # Whether error or not, make sure previous overwrite status is restored
+        msg = e.args[0]
+        msg += '  You may avert this error by passing keyword `overwrite=True` to `load`!'
+        raise ValueError(msg)
+
+    return obj
+
+def get_probe(probe):
+    """Intended primarily to find a probe whose name is `probe`; can also feed-through `probe` of type `Probe`."""
+
+    assert isinstance(probe, (Probe, str))
+
+    if isinstance(probe,Probe): return probe
+    elif isinstance(probe,str):
+        probe_name = probe
+        try: probe = ProbesCollection[probe_name]
+        except KeyError:
+            probe = load(probe_name,Probe,overwrite_probe=True) # this will automatically add to ProbeCollection
+
+        return probe
+
+class BookmarkedSerialization(object):
+    """Inheritors should implement `get_probe` method and `attrs_to_serialize` attribute.
+    Attributes listed in the latter should themselves also have `get_probe` method so that
+    they are compatible with `PCE.save(..)` for automatic serialization."""
+
+    attrs_to_serialize = {}
+
+    class ProbeBookmark(object):
+
+        def __init__(self, probe_name, cls):
+
+            assert isinstance(probe_name,str)
+            assert isinstance(cls,type)
+            self.probe_name=probe_name
+            self.cls=cls
+
+        def Load(self): return load(self.probe_name,
+                                    self.cls,
+                                    overwrite_probe=True)
+
+    def __getstate__(self):
+
+        state = self.__dict__.copy()
+
+        # Check if we are pickling, otherwise pass through state dictionary
+        stack = inspect.stack()
+        is_pickle = any('pickle' in frame.filename for frame in stack)
+        if not is_pickle: return state
+
+        # Save bulky objects alone, and replace dictionary value with cls
+        probe_name = self.get_probe().get_name()
+        for attr in self.attrs_to_serialize:
+            if not attr in state: continue # It's okay if we listed redundant items in `attrs_to_serialize`
+            obj = state[attr]
+            save(obj,overwrite=True) # here the `obj` should have `get_probe` attribute.
+            state[attr]=self.ProbeBookmark(probe_name,type(obj)) # Replace with bookmark rather than actual object
+
+        return state
+
+    def __setstate__(self, state):
+
+        self.__dict__.update(state)
+
+        # The primary purpose here is to rename legacy attributes upon unpickling
+        #newattrs = {'_P': 'Probe'}
+        #for dest, src in newattrs.items():
+        #    if not hasattr(self, dest):
+        #        if isinstance(src, str):  # interpret src as a key to write from
+        #            if src in state:  setattr(self, dest, state[src])
+        #        else:
+        #            setattr(self, dest, src)
+
+        # Load objects from file if they were stored by probe name bookmark only
+        for attr in self.attrs_to_serialize:
+            if not attr in self.__dict__: continue # It's okay if we listed redundant items in `attrs_to_serialize`
+            try:
+                bookmark = self.__dict__[attr]
+                # New loading interface
+                if isinstance(bookmark, self.ProbeBookmark):
+                    self.__dict__[attr] = bookmark.Load()
+                # Old loading interface
+                elif isinstance(bookmark, str):
+                    probe_name = bookmark
+                    cls = self.attrs_to_serialize[attr]
+                    self.__dict__[attr] = load(probe_name, cls)
+            except:
+                print('Trouble loading attribute "%s" into object %s, probably serialized improperly!'%(attr,type(self)))
+                raise
+
+SlenderizeSerialization = BookmarkedSerialization # A backwards compatible alias
